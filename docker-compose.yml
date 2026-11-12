@@ -7,8 +7,8 @@ services:
     container_name: agento-control-remote
     restart: unless-stopped
     ports:
-      - "8080:8080"
-      - "8443:8443"
+      - "${PORT_HTTP:-8080}:8080"
+      - "${PORT_HTTPS:-8443}:8443"
     volumes:
       - ./data:/app/data
       - ./ssl:/app/ssl

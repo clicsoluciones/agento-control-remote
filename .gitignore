@@ -14,3 +14,5 @@ ssl/
 nvs_backups/
 data/*.db
 data/*.sqlite*
+.env
+.env.*

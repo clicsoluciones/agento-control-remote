@@ -294,6 +294,23 @@ def cmd_status(args):
     print()
 
 
+def get_env_var(var_name: str, default=None):
+    val = os.getenv(var_name)
+    if val:
+        return val
+    env_file = os.path.join(WORKSPACE, ".env")
+    if os.path.exists(env_file):
+        try:
+            with open(env_file, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith(f"{var_name}="):
+                        return line.split("=", 1)[1].strip().strip('"').strip("'")
+        except Exception:
+            pass
+    return default
+
+
 def cmd_route(args):
     target = args.target.lower()
     lan_ip = get_local_lan_ip()
@@ -308,9 +325,33 @@ def cmd_route(args):
         ws_target = "wss://api.tenclass.net/xiaozhi/v1/"
         desc = "Native Factory Cloud (Bitsy / TenClass)"
     elif target == "local":
-        ota_target = f"http://{lan_ip}:8003/xiaozhi/ota/"
-        ws_target = f"ws://{lan_ip}:8000/xiaozhi/v1/"
-        desc = f"Local Backend ({lan_ip})"
+        url = args.custom_url or f"http://{lan_ip}:8080"
+        ota_target = url.rstrip("/") + "/xiaozhi/ota/"
+        ws_target = url.replace("http://", "ws://").replace("https://", "wss://").rstrip("/") + "/xiaozhi/v1/"
+        desc = f"Modo Local ({url})"
+    elif target in ("prod", "production"):
+        prod_url = args.custom_url or get_env_var("ROBOT_PROD_URL")
+        if not prod_url:
+            print(f"{YELLOW}No se especificó la URL de Producción.{RESET}")
+            try:
+                prod_url = input(f"{BOLD}Ingrese la URL o IP del servidor de Producción (ej: http://MI_VPS_IP:8088): {RESET}").strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\nOperación cancelada.")
+                return
+            if prod_url:
+                env_file = os.path.join(WORKSPACE, ".env")
+                try:
+                    with open(env_file, "a") as f:
+                        f.write(f"\nROBOT_PROD_URL={prod_url}\n")
+                    print(f"{GREEN}✔ Guardado en .env local (ROBOT_PROD_URL){RESET}")
+                except Exception:
+                    pass
+        if not prod_url:
+            print(f"{RED}[ERROR] URL de producción requerida.{RESET}")
+            return
+        ota_target = prod_url.rstrip("/") + "/xiaozhi/ota/"
+        ws_target = prod_url.replace("http://", "ws://").replace("https://", "wss://").rstrip("/") + "/xiaozhi/v1/"
+        desc = "Modo Producción (Servidor VPS Remoto)"
     else:
         print(f"{RED}[ERROR] Unknown target: {target}{RESET}")
         return
@@ -543,8 +584,8 @@ def main():
 
     subparsers.add_parser("status", help="Show hardware, NVS endpoints, and gateway Docker status")
 
-    p_route = subparsers.add_parser("route", help="Switch robot endpoint (custom | native | local)")
-    p_route.add_argument("target", choices=["custom", "native", "local"], help="Target destination")
+    p_route = subparsers.add_parser("route", help="Switch robot endpoint (local | prod | native | custom)")
+    p_route.add_argument("target", choices=["local", "prod", "production", "native", "custom"], help="Target destination")
     p_route.add_argument("--url", dest="custom_url", help="Custom server URL (defaults to http://<lan_ip>:8080)")
 
     subparsers.add_parser("monitor", help="Open real-time serial monitor of the robot")
