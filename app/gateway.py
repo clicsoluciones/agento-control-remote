@@ -53,6 +53,8 @@ class XiaozhiGateway:
         self._upstream_hello_event: asyncio.Event = asyncio.Event()
 
         self.device_headers: Dict[str, str] = {}
+        self.connected_device_info: Optional[Dict[str, Any]] = None
+        self.connected_device_name: Optional[str] = None
         self.last_robot_hello: Dict[str, Any] = dict(DEFAULT_ROBOT_HELLO)
         self.last_upstream_hello: Optional[Dict[str, Any]] = None
         self.upstream_listening_state: Optional[str] = None
@@ -74,6 +76,8 @@ class XiaozhiGateway:
             "current_emotion": self.current_emotion,
             "current_emoji": self.current_emoji,
             "remotes_connected": len(self.remote_clients),
+            "device_name": self.connected_device_name,
+            "device_id": self.device_headers.get("Device-Id"),
         }
 
     async def broadcast_to_remotes(self, message: Dict[str, Any]):
@@ -377,6 +381,17 @@ class XiaozhiGateway:
         self.robot_ws = ws
         if incoming_headers:
             self.device_headers.update(incoming_headers)
+            dev_id = incoming_headers.get("Device-Id")
+            if dev_id:
+                try:
+                    from app.db import get_device_by_device_id
+                    reg = get_device_by_device_id(dev_id)
+                    if reg:
+                        self.connected_device_info = reg
+                        self.connected_device_name = reg["name"]
+                        logger.info(f"Robot hardware matched registered device: {reg['name']} ({dev_id})")
+                except Exception as e:
+                    logger.warning(f"Could not query DB for device_id {dev_id}: {e}")
         logger.info(f"Robot connected. Headers: {incoming_headers}")
 
         if old_ws is not None and old_ws is not ws:

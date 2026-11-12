@@ -412,6 +412,120 @@ def cmd_restore(args):
     print(f"\n{GREEN}✔ Firmware restored and chip restarted!{RESET}")
 
 
+def read_device_mac():
+    """Read the MAC address directly from the connected ESP32 chip using esptool."""
+    cmd = ESPTOOL_CMD + ["-p", PORT, "read-mac"]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode == 0:
+            import re
+            m = re.findall(r"MAC:\s+([0-9a-fA-F:]{17})", res.stdout)
+            if m:
+                return m[0].lower()
+    except Exception as e:
+        print(f"{YELLOW}[WARN] Could not read MAC via esptool: {e}{RESET}")
+    return None
+
+
+def read_device_uuid():
+    """Extract Client-Id UUID from NVS if available, else None."""
+    try:
+        buf = read_device_nvs()
+        if buf:
+            import re
+            m = re.findall(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', buf.decode('latin1', errors='ignore'))
+            if m:
+                return m[0]
+    except Exception:
+        pass
+    return None
+
+
+def cmd_account_create(args):
+    import secrets
+    import uuid
+    if WORKSPACE not in sys.path:
+        sys.path.insert(0, WORKSPACE)
+    from app.db import create_or_update_device
+
+    print(f"\n{BOLD}{CYAN}=== REGISTRO DE CUENTA DE DISPOSITIVO (agento-control-remote) ==={RESET}\n")
+
+    # 1. Ask only for device name if not passed
+    name = args.name
+    if not name:
+        try:
+            name = input(f"{BOLD}Nombre del dispositivo (ej: robot-1): {RESET}").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nOperación cancelada.")
+            return
+
+    if not name:
+        print(f"{RED}[ERROR] El nombre del dispositivo es obligatorio.{RESET}")
+        return
+
+    # 2. Compute device_id (MAC) from hardware
+    print(f"{CYAN}1. Detectando dirección MAC desde {PORT}...{RESET}")
+    mac = read_device_mac()
+    if not mac:
+        print(f"{YELLOW}[ADVERTENCIA] No se pudo leer MAC desde {PORT}. Usando identificador por defecto.{RESET}")
+        mac = "7c:0c:5f:54:cc:b8"
+    else:
+        print(f"   {GREEN}✔ MAC detectada:{RESET} {mac}")
+
+    # 3. Compute client_id (UUID) from NVS or generate
+    print(f"{CYAN}2. Detectando Client-Id UUID desde NVS...{RESET}")
+    client_uuid = read_device_uuid()
+    if not client_uuid:
+        client_uuid = str(uuid.uuid4())
+        print(f"   {YELLOW}UUID generado:{RESET} {client_uuid}")
+    else:
+        print(f"   {GREEN}✔ UUID detectado:{RESET} {client_uuid}")
+
+    # 4. Generate or receive password
+    password = args.password
+    if not password:
+        password = secrets.token_urlsafe(10)
+
+    # 5. Save to SQLite database
+    print(f"{CYAN}3. Guardando credenciales en base de datos SQLite (data/devices.db)...{RESET}")
+    create_or_update_device(name=name, device_id=mac, client_id=client_uuid, password=password)
+
+    lan_ip = get_local_lan_ip()
+
+    # 6. Print clean formatted credential card to terminal
+    print(f"\n{BOLD}{GREEN}================================================================={RESET}")
+    print(f"{BOLD}{GREEN}  ✔ CUENTA DE DISPOSITIVO REGISTRADA CON ÉXITO{RESET}")
+    print(f"{BOLD}{GREEN}================================================================={RESET}")
+    print(f"  {BOLD}Nombre del Dispositivo:{RESET}  {CYAN}{name}{RESET}")
+    print(f"  {BOLD}Device-Id (MAC):{RESET}         {mac}")
+    print(f"  {BOLD}Client-Id (UUID):{RESET}        {client_uuid}")
+    print(f"  {BOLD}Contraseña de Acceso:{RESET}    {YELLOW}{password}{RESET}")
+    print(f"-----------------------------------------------------------------")
+    print(f"  {BOLD}URL de Acceso Web:{RESET}       https://{lan_ip}:8443/")
+    print(f"  {BOLD}Credenciales de Inicio de Sesión:{RESET}")
+    print(f"    • Dispositivo: {CYAN}{name}{RESET}")
+    print(f"    • Contraseña:  {YELLOW}{password}{RESET}")
+    print(f"{BOLD}{GREEN}================================================================={RESET}\n")
+
+
+def cmd_account_list(args):
+    if WORKSPACE not in sys.path:
+        sys.path.insert(0, WORKSPACE)
+    from app.db import list_devices
+    devices = list_devices()
+    print(f"\n{BOLD}{CYAN}=== DISPOSITIVOS REGISTRADOS EN SQLite (data/devices.db) ==={RESET}\n")
+    if not devices:
+        print(f"  {YELLOW}No hay dispositivos registrados aún. Ejecute './robot-cli account create'{RESET}\n")
+        return
+
+    header = f"{'ID':<4} {'Nombre':<15} {'Device-Id (MAC)':<20} {'Client-Id (UUID)':<38} {'Creado'}"
+    print(f"{BOLD}{header}{RESET}")
+    print("-" * len(header))
+    for d in devices:
+        print(f"{d['id']:<4} {d['name']:<15} {d['device_id']:<20} {d['client_id']:<38} {d['created_at']}")
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Robot CLI - Standalone Controller for agento-control-remote")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -430,6 +544,15 @@ def main():
     p_restore = subparsers.add_parser("restore", help="Restore factory or custom firmware")
     p_restore.add_argument("--file", help="Custom firmware .bin file to restore (defaults to factory)")
 
+    p_account = subparsers.add_parser("account", help="Manage multi-device robot accounts in SQLite")
+    acc_sub = p_account.add_subparsers(dest="account_cmd", required=True)
+
+    p_acc_create = acc_sub.add_parser("create", help="Create a device account from connected hardware")
+    p_acc_create.add_argument("--name", help="Device name (e.g. robot-1)")
+    p_acc_create.add_argument("--password", help="Device password (auto-generated if omitted)")
+
+    p_acc_list = acc_sub.add_parser("list", help="List registered device accounts")
+
     args = parser.parse_args()
 
     if args.command == "status":
@@ -442,6 +565,11 @@ def main():
         cmd_backup(args)
     elif args.command == "restore":
         cmd_restore(args)
+    elif args.command == "account":
+        if args.account_cmd == "create":
+            cmd_account_create(args)
+        elif args.account_cmd == "list":
+            cmd_account_list(args)
 
 
 if __name__ == "__main__":

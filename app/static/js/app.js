@@ -17,6 +17,15 @@ const btnStop = document.getElementById("btn-stop");
 const pttText = document.getElementById("ptt-text");
 const transcriptFeed = document.getElementById("transcript-feed");
 const emotionButtons = document.querySelectorAll(".btn-emotion");
+const userBar = document.getElementById("user-bar");
+const loggedDeviceName = document.getElementById("logged-device-name");
+const btnLogout = document.getElementById("btn-logout");
+const loginCard = document.getElementById("login-card");
+const controlDashboard = document.getElementById("control-dashboard");
+const loginForm = document.getElementById("login-form");
+const loginNameInput = document.getElementById("login-name");
+const loginPasswordInput = document.getElementById("login-password");
+const loginError = document.getElementById("login-error");
 
 // Initialize WebSocket Connection
 function connectWS() {
@@ -314,5 +323,88 @@ if (btnStop) {
   });
 }
 
-// Start WebSocket connection on load
-connectWS();
+// Authentication & Session Management
+async function checkAuth() {
+  try {
+    const res = await fetch("/api/auth/me");
+    if (res.ok) {
+      const data = await res.json();
+      showAuthenticatedUI(data.device);
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        connectWS();
+      }
+    } else {
+      showLoginUI();
+      if (ws) {
+        ws.close();
+        ws = null;
+      }
+    }
+  } catch (e) {
+    console.warn("Auth check error:", e);
+    showLoginUI();
+  }
+}
+
+function showAuthenticatedUI(device) {
+  if (loginCard) loginCard.style.display = "none";
+  if (controlDashboard) controlDashboard.style.display = "block";
+  if (userBar) userBar.style.display = "flex";
+  if (loggedDeviceName && device) {
+    loggedDeviceName.textContent = device.name;
+  }
+}
+
+function showLoginUI() {
+  if (loginCard) loginCard.style.display = "block";
+  if (controlDashboard) controlDashboard.style.display = "none";
+  if (userBar) userBar.style.display = "none";
+}
+
+if (loginForm) {
+  loginForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (loginError) loginError.style.display = "none";
+    const name = loginNameInput.value.trim();
+    const password = loginPasswordInput.value;
+
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, password })
+      });
+      const data = await res.json();
+      if (res.ok && data.status === "ok") {
+        loginForm.reset();
+        await checkAuth();
+      } else {
+        if (loginError) {
+          loginError.textContent = data.detail || "Error al iniciar sesión. Verifique nombre y contraseña.";
+          loginError.style.display = "block";
+        }
+      }
+    } catch (err) {
+      if (loginError) {
+        loginError.textContent = "Error de conexión con el servidor.";
+        loginError.style.display = "block";
+      }
+    }
+  });
+}
+
+if (btnLogout) {
+  btnLogout.addEventListener("click", async () => {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch (_) {}
+    showLoginUI();
+    if (ws) {
+      ws.close();
+      ws = null;
+    }
+  });
+}
+
+// Initial authentication check on page load
+checkAuth();

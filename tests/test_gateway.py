@@ -108,3 +108,55 @@ def test_opus_encoder_64bit_safety():
     flushed = enc.flush()
     assert len(flushed) == 1
     assert len(flushed[0]) > 0
+
+
+@pytest.mark.asyncio
+async def test_db_device_and_auth_endpoints():
+    from app.db import create_or_update_device, authenticate_device
+
+    # 1. Register a test device
+    dev = create_or_update_device(
+        name="test-robot",
+        device_id="aa:bb:cc:dd:ee:ff",
+        client_id="11111111-2222-3333-4444-555555555555",
+        password="secretpassword"
+    )
+    assert dev["name"] == "test-robot"
+
+    # 2. Authenticate with correct & incorrect credentials
+    auth_ok = authenticate_device("test-robot", "secretpassword")
+    assert auth_ok is not None
+    assert auth_ok["name"] == "test-robot"
+
+    auth_bad = authenticate_device("test-robot", "wrongpassword")
+    assert auth_bad is None
+
+    # 3. Test API /api/auth/login
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        # Invalid login
+        res_fail = await ac.post("/api/auth/login", json={"name": "test-robot", "password": "wrong"})
+        assert res_fail.status_code == 401
+
+        # Valid login
+        res_ok = await ac.post("/api/auth/login", json={"name": "test-robot", "password": "secretpassword"})
+        assert res_ok.status_code == 200
+        data = res_ok.json()
+        assert data["status"] == "ok"
+        token = data["token"]
+        assert token
+
+        # Verify session via /api/auth/me with Bearer token
+        res_me = await ac.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert res_me.status_code == 200
+        me_data = res_me.json()
+        assert me_data["authenticated"] is True
+        assert me_data["device"]["name"] == "test-robot"
+
+        # Logout
+        res_logout = await ac.post("/api/auth/logout", headers={"Authorization": f"Bearer {token}"})
+        assert res_logout.status_code == 200
+
+        # /api/auth/me should fail now
+        res_me_after = await ac.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert res_me_after.status_code == 401

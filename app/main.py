@@ -3,7 +3,7 @@ import time
 import json
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -11,6 +11,15 @@ from typing import Optional
 
 from app.gateway import gateway, EMOTION_MAP
 from app.config import settings
+from app.db import (
+    authenticate_device,
+    create_session,
+    verify_session,
+    delete_session,
+    get_device_by_name,
+    get_device_by_device_id,
+    list_devices,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,6 +62,81 @@ async def get_index():
 @app.get("/api/status")
 async def get_status():
     return gateway.get_status()
+
+
+class LoginRequest(BaseModel):
+    name: str
+    password: str
+
+
+@app.post("/api/auth/login")
+async def auth_login(req: LoginRequest, response: Response):
+    dev = authenticate_device(req.name, req.password)
+    if not dev:
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+    token = create_session(dev["name"])
+    response.set_cookie(
+        key="session_token",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=86400 * 30
+    )
+    return {
+        "status": "ok",
+        "token": token,
+        "device": {
+            "name": dev["name"],
+            "device_id": dev["device_id"],
+            "client_id": dev["client_id"]
+        }
+    }
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    token = request.cookies.get("session_token")
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ", 1)[1].strip()
+
+    if not token:
+        registered = list_devices()
+        # If no devices are registered in system yet, allow setup mode
+        if not registered:
+            return {"authenticated": False, "setup_required": True, "devices_count": 0}
+        raise HTTPException(status_code=401, detail="No autenticado")
+
+    device_name = verify_session(token)
+    if not device_name:
+        raise HTTPException(status_code=401, detail="Sesión inválida o expirada")
+
+    dev = get_device_by_name(device_name)
+    if not dev:
+        raise HTTPException(status_code=401, detail="Dispositivo no encontrado")
+
+    return {
+        "authenticated": True,
+        "device": {
+            "name": dev["name"],
+            "device_id": dev["device_id"],
+            "client_id": dev["client_id"]
+        }
+    }
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request, response: Response):
+    token = request.cookies.get("session_token")
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ", 1)[1].strip()
+    if token:
+        delete_session(token)
+    response.delete_cookie("session_token")
+    return {"status": "ok", "message": "Sesión cerrada"}
 
 
 class EmotionRequest(BaseModel):
@@ -122,6 +206,14 @@ async def robot_websocket_endpoint(websocket: WebSocket):
 # Mobile / Remote Control WebSocket Endpoint
 @app.websocket("/ws/remote")
 async def remote_websocket_endpoint(websocket: WebSocket):
+    # If device accounts exist, authenticate remote connection
+    registered = list_devices()
+    if registered:
+        token = websocket.query_params.get("token") or websocket.cookies.get("session_token")
+        if not token or not verify_session(token):
+            await websocket.close(code=4001, reason="Unauthorized")
+            return
+
     await gateway.register_remote(websocket)
     try:
         while True:
