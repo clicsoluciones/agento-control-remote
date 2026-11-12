@@ -160,3 +160,19 @@ async def test_db_device_and_auth_endpoints():
         # /api/auth/me should fail now
         res_me_after = await ac.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
         assert res_me_after.status_code == 401
+
+        # Test remote API registration endpoint /api/devices/register
+        reg_res = await ac.post("/api/devices/register", json={
+            "name": "remote-api-robot",
+            "device_id": "bb:cc:dd:ee:ff:00",
+            "client_id": "22222222-3333-4444-5555-666666666666",
+            "password": "apipassword123"
+        })
+        assert reg_res.status_code == 200
+        assert reg_res.json()["status"] == "ok"
+
+        # Verify device list endpoint
+        list_res = await ac.get("/api/devices")
+        assert list_res.status_code == 200
+        device_names = [d["name"] for d in list_res.json()["devices"]]
+        assert "remote-api-robot" in device_names

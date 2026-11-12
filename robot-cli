@@ -482,6 +482,22 @@ def read_device_uuid():
     return None
 
 
+def api_request(url: str, method: str = "GET", payload: dict = None):
+    import urllib.request
+    import json
+    import ssl
+
+    data = json.dumps(payload).encode("utf-8") if payload else None
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    headers = {"Content-Type": "application/json"} if payload else {}
+    req = urllib.request.Request(url, data=data, headers=headers)
+    req.method = method
+    with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
 def cmd_account_create(args):
     import secrets
     import uuid
@@ -538,34 +554,101 @@ def cmd_account_create(args):
     if not password:
         password = secrets.token_urlsafe(12)
 
-    # 5. Save to SQLite database
-    print(f"{CYAN}3. Guardando credenciales en base de datos SQLite (data/devices.db)...{RESET}")
+    # 5. Save to local SQLite database
+    print(f"{CYAN}3. Guardando credenciales en base de datos SQLite local (data/devices.db)...{RESET}")
     create_or_update_device(name=name, device_id=mac, client_id=client_uuid, password=password)
 
-    lan_ip = get_local_lan_ip()
+    # 6. If target is production, register directly via Server REST API (no SSH / back access required!)
+    is_prod = getattr(args, "prod", False) or bool(getattr(args, "url", None))
+    prod_url = getattr(args, "url", None) or get_env_var("ROBOT_PROD_URL")
 
-    # 6. Print clean formatted credential card to terminal
+    if is_prod and not prod_url:
+        try:
+            prod_url = input(f"{BOLD}URL del servidor de Producción (ej: http://MI-VPS:8088): {RESET}").strip()
+            if prod_url:
+                env_file = os.path.join(WORKSPACE, ".env")
+                try:
+                    with open(env_file, "a") as f:
+                        f.write(f"\nROBOT_PROD_URL={prod_url}\n")
+                    print(f"{GREEN}✔ Guardado en .env local (ROBOT_PROD_URL){RESET}")
+                except Exception:
+                    pass
+        except (KeyboardInterrupt, EOFError):
+            print("\nOperación cancelada.")
+            return
+
+    if is_prod and prod_url:
+        print(f"{CYAN}4. Registrando en API de Producción ({prod_url})...{RESET}")
+        try:
+            reg_endpoint = prod_url.rstrip("/") + "/api/devices/register"
+            res = api_request(reg_endpoint, method="POST", payload={
+                "name": name,
+                "device_id": mac,
+                "client_id": client_uuid,
+                "password": password
+            })
+            if res.get("status") == "ok":
+                print(f"   {GREEN}✔ Cuenta registrada exitosamente en el servidor de producción vía API REST.{RESET}")
+            else:
+                print(f"   {YELLOW}[ADVERTENCIA] Respuesta de la API: {res}{RESET}")
+        except Exception as e:
+            print(f"   {YELLOW}[ADVERTENCIA] Error registrando vía API del servidor: {e}{RESET}")
+
+    lan_ip = get_local_lan_ip()
+    access_url = f"https://{lan_ip}:8443/"
+    if is_prod and prod_url:
+        import urllib.parse
+        parsed = urllib.parse.urlparse(prod_url)
+        access_url = f"https://{parsed.hostname}:8443/"
+    elif is_prod:
+        access_url = "https://<TU_IP_O_DOMINIO_VPS>:8443/"
+
+    # 7. Print clean formatted credential card to terminal
+    env_title = "PRODUCCIÓN (API Remota)" if is_prod else "LOCAL"
     print(f"\n{BOLD}{GREEN}================================================================={RESET}")
-    print(f"{BOLD}{GREEN}  ✔ CUENTA DE DISPOSITIVO REGISTRADA CON ÉXITO{RESET}")
+    print(f"{BOLD}{GREEN}  ✔ CUENTA DE DISPOSITIVO REGISTRADA CON ÉXITO [{env_title}]{RESET}")
     print(f"{BOLD}{GREEN}================================================================={RESET}")
     print(f"  {BOLD}Nombre del Dispositivo:{RESET}  {CYAN}{name}{RESET}")
     print(f"  {BOLD}Device-Id (MAC):{RESET}         {mac}")
     print(f"  {BOLD}Client-Id (UUID):{RESET}        {client_uuid}")
     print(f"  {BOLD}Contraseña de Acceso:{RESET}    {YELLOW}{password}{RESET}")
     print(f"-----------------------------------------------------------------")
-    print(f"  {BOLD}URL de Acceso Web:{RESET}       https://{lan_ip}:8443/")
-    print(f"  {BOLD}Credenciales de Inicio de Sesión:{RESET}")
+    print(f"  {BOLD}URL de Acceso Web (PWA):{RESET} {access_url}")
+    print(f"  {BOLD}Credenciales para Login:{RESET}")
     print(f"    • Dispositivo: {CYAN}{name}{RESET}")
     print(f"    • Contraseña:  {YELLOW}{password}{RESET}")
     print(f"{BOLD}{GREEN}================================================================={RESET}\n")
 
 
 def cmd_account_list(args):
-    if WORKSPACE not in sys.path:
-        sys.path.insert(0, WORKSPACE)
-    from app.db import list_devices
-    devices = list_devices()
-    print(f"\n{BOLD}{CYAN}=== DISPOSITIVOS REGISTRADOS EN SQLite (data/devices.db) ==={RESET}\n")
+    is_prod = getattr(args, "prod", False) or bool(getattr(args, "url", None))
+    prod_url = getattr(args, "url", None) or get_env_var("ROBOT_PROD_URL")
+
+    if is_prod:
+        if not prod_url:
+            try:
+                prod_url = input(f"{BOLD}URL del servidor de Producción (ej: http://MI-VPS:8088): {RESET}").strip()
+            except (KeyboardInterrupt, EOFError):
+                return
+        if not prod_url:
+            print(f"{RED}[ERROR] URL de producción requerida.{RESET}")
+            return
+
+        print(f"\n{BOLD}{CYAN}=== DISPOSITIVOS EN PRODUCCIÓN ({prod_url}) ==={RESET}\n")
+        try:
+            list_endpoint = prod_url.rstrip("/") + "/api/devices"
+            res = api_request(list_endpoint, method="GET")
+            devices = res.get("devices", [])
+        except Exception as e:
+            print(f"{RED}[ERROR] Error consultando la API de producción: {e}{RESET}")
+            return
+    else:
+        if WORKSPACE not in sys.path:
+            sys.path.insert(0, WORKSPACE)
+        from app.db import list_devices
+        devices = list_devices()
+        print(f"\n{BOLD}{CYAN}=== DISPOSITIVOS REGISTRADOS EN SQLite LOCAL (data/devices.db) ==={RESET}\n")
+
     if not devices:
         print(f"  {YELLOW}No hay dispositivos registrados aún. Ejecute './robot-cli account create'{RESET}\n")
         return
@@ -601,8 +684,12 @@ def main():
 
     p_acc_create = acc_sub.add_parser("create", help="Create a device account from connected hardware")
     p_acc_create.add_argument("--name", help="Device name (e.g. robot-1)")
+    p_acc_create.add_argument("--prod", action="store_true", help="Register directly to production server via REST API")
+    p_acc_create.add_argument("--url", help="Custom production server URL (e.g. http://<VPS_IP>:8088)")
 
     p_acc_list = acc_sub.add_parser("list", help="List registered device accounts")
+    p_acc_list.add_argument("--prod", action="store_true", help="List devices registered on production server via REST API")
+    p_acc_list.add_argument("--url", help="Custom production server URL (e.g. http://<VPS_IP>:8088)")
 
     args = parser.parse_args()
 

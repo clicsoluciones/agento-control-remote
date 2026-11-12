@@ -13,6 +13,7 @@ from app.gateway import gateway, EMOTION_MAP
 from app.config import settings
 from app.db import (
     authenticate_device,
+    create_or_update_device,
     create_session,
     verify_session,
     delete_session,
@@ -67,6 +68,43 @@ async def get_status():
 class LoginRequest(BaseModel):
     name: str
     password: str
+
+
+class RegisterDeviceRequest(BaseModel):
+    name: str
+    device_id: str
+    client_id: str
+    password: str
+
+
+@app.post("/api/devices/register")
+@app.post("/api/auth/register")
+async def register_device(req: RegisterDeviceRequest):
+    if not req.name.strip():
+        raise HTTPException(status_code=400, detail="El nombre del dispositivo es obligatorio")
+    if not req.password:
+        raise HTTPException(status_code=400, detail="La contraseña es obligatoria")
+
+    dev = create_or_update_device(
+        name=req.name.strip(),
+        device_id=req.device_id.strip(),
+        client_id=req.client_id.strip(),
+        password=req.password
+    )
+    return {
+        "status": "ok",
+        "message": "Dispositivo registrado con éxito",
+        "device": {
+            "name": dev["name"],
+            "device_id": dev["device_id"],
+            "client_id": dev["client_id"]
+        }
+    }
+
+
+@app.get("/api/devices")
+async def get_devices():
+    return {"devices": list_devices()}
 
 
 @app.post("/api/auth/login")
