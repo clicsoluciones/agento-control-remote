@@ -481,10 +481,21 @@ def cmd_account_create(args):
     else:
         print(f"   {GREEN}✔ UUID detectado:{RESET} {client_uuid}")
 
-    # 4. Generate or receive password
-    password = args.password
+    # 4. Generate password securely (or prompt without echo)
+    # Never accept password via CLI flags to avoid leaking into bash history and process table
+    import getpass
+    password = ""
+    if sys.stdin.isatty():
+        try:
+            custom_pw = getpass.getpass(f"{BOLD}Contraseña personalizada (Enter para generar aleatoria segura): {RESET}").strip()
+            if custom_pw:
+                password = custom_pw
+        except (KeyboardInterrupt, EOFError):
+            print("\nOperación cancelada.")
+            return
+
     if not password:
-        password = secrets.token_urlsafe(10)
+        password = secrets.token_urlsafe(12)
 
     # 5. Save to SQLite database
     print(f"{CYAN}3. Guardando credenciales en base de datos SQLite (data/devices.db)...{RESET}")
@@ -549,7 +560,6 @@ def main():
 
     p_acc_create = acc_sub.add_parser("create", help="Create a device account from connected hardware")
     p_acc_create.add_argument("--name", help="Device name (e.g. robot-1)")
-    p_acc_create.add_argument("--password", help="Device password (auto-generated if omitted)")
 
     p_acc_list = acc_sub.add_parser("list", help="List registered device accounts")
 
