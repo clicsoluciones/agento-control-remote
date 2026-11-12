@@ -206,7 +206,8 @@ async def stop_robot_speech():
 async def ota_endpoint(request: Request):
     headers = request.headers
     host = headers.get("host", f"{settings.host}:{settings.port}")
-    ws_proto = "wss" if "https" in str(request.url) else "ws"
+    forwarded_proto = headers.get("x-forwarded-proto")
+    ws_proto = "wss" if (forwarded_proto == "https" or "https" in str(request.url)) else "ws"
     ws_url = f"{ws_proto}://{host}/xiaozhi/v1/"
     return {
         "server_time": {

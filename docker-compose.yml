@@ -10,6 +10,7 @@ services:
       - "${PORT_HTTP:-8080}:8080"
       - "${PORT_HTTPS:-8443}:8443"
     volumes:
+      - ./app:/app/app
       - ./data:/app/data
       - ./ssl:/app/ssl
     environment:
