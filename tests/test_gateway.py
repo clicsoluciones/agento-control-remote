@@ -65,3 +65,30 @@ async def test_api_mic_endpoint():
         assert response.status_code == 200
         data = response.json()
         assert data["robot_mic_muted"] is True
+
+
+@pytest.mark.asyncio
+async def test_ota_endpoint_includes_server_time_and_websocket():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.post("/xiaozhi/ota/")
+        assert response.status_code == 200
+        data = response.json()
+        assert "server_time" in data
+        assert "timestamp" in data["server_time"]
+        assert "websocket" in data
+        assert "/xiaozhi/v1/" in data["websocket"]["url"]
+
+
+def test_opus_encoder_64bit_safety():
+    from app.audio_codec import OpusEncoder
+    enc = OpusEncoder(sample_rate=16000, channels=1, frame_duration_ms=60)
+    # 2048 samples = 4096 bytes -> 2 full 1920-byte frames + 256 leftover bytes
+    packets = enc.encode_pcm(b"\x10\x00" * 2048)
+    assert len(packets) == 2
+    for pkt in packets:
+        assert isinstance(pkt, bytes)
+        assert len(pkt) > 0
+    flushed = enc.flush()
+    assert len(flushed) == 1
+    assert len(flushed[0]) > 0

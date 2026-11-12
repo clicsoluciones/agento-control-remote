@@ -20,15 +20,37 @@ class OpusEncoder:
         self.buffer = bytearray()
 
         self._lib = self._load_library()
+        self._setup_bindings()
         err = ctypes.c_int(0)
         self._encoder = self._lib.opus_encoder_create(
-            ctypes.c_int(self.sample_rate),
+            ctypes.c_int32(self.sample_rate),
             ctypes.c_int(self.channels),
             ctypes.c_int(OPUS_APPLICATION_VOIP),
             ctypes.byref(err)
         )
         if err.value != 0 or not self._encoder:
             raise RuntimeError(f"Failed to initialize libopus encoder: code {err.value}")
+
+    def _setup_bindings(self):
+        self._lib.opus_encoder_create.argtypes = [
+            ctypes.c_int32,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_int),
+        ]
+        self._lib.opus_encoder_create.restype = ctypes.c_void_p
+
+        self._lib.opus_encode.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int16),
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_ubyte),
+            ctypes.c_int32,
+        ]
+        self._lib.opus_encode.restype = ctypes.c_int32
+
+        self._lib.opus_encoder_destroy.argtypes = [ctypes.c_void_p]
+        self._lib.opus_encoder_destroy.restype = None
 
     def _load_library(self) -> ctypes.CDLL:
         candidates = ["libopus.so.0", "libopus.so", "opus"]
@@ -60,12 +82,23 @@ class OpusEncoder:
                 pcm_arr,
                 ctypes.c_int(self.frame_size),
                 out_buf,
-                ctypes.c_int(1024)
+                ctypes.c_int32(1024)
             )
             if n > 0:
                 packets.append(bytes(out_buf[:n]))
 
         return packets
+
+    def flush(self) -> List[bytes]:
+        """
+        Pads any remaining partial PCM frame with silence and encodes it.
+        """
+        if not self.buffer:
+            return []
+        pad_len = self.bytes_per_frame - len(self.buffer)
+        if pad_len > 0:
+            self.buffer.extend(b"\x00" * pad_len)
+        return self.encode_pcm(b"")
 
     def reset(self):
         self.buffer.clear()

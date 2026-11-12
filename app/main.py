@@ -1,4 +1,5 @@
 import os
+import time
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -71,6 +72,29 @@ class MicRequest(BaseModel):
 async def set_mic(req: MicRequest):
     muted = await gateway.set_mic_muted(req.muted)
     return {"status": "ok", "robot_mic_muted": muted}
+
+
+@app.post("/xiaozhi/ota/")
+@app.post("/ota/")
+async def ota_endpoint(request: Request):
+    headers = request.headers
+    host = headers.get("host", f"{settings.host}:{settings.port}")
+    ws_proto = "wss" if "https" in str(request.url) else "ws"
+    ws_url = f"{ws_proto}://{host}/xiaozhi/v1/"
+    return {
+        "server_time": {
+            "timestamp": int(time.time() * 1000),
+            "timezone_offset": -300
+        },
+        "firmware": {
+            "version": "2.5.3",
+            "url": ""
+        },
+        "websocket": {
+            "url": ws_url,
+            "token": settings.auth_token
+        }
+    }
 
 
 # Robot WebSocket Endpoints (support standard endpoints used by Xiaozhi firmwares)

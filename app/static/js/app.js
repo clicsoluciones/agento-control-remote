@@ -1,9 +1,11 @@
 // agento-control-remote PWA controller
 let ws = null;
 let isRecording = false;
+let wantRecording = false;
 let audioCtx = null;
 let scriptNode = null;
 let mediaStream = null;
+let lastAssistantText = "";
 
 // DOM Elements
 const badgeRobot = document.getElementById("badge-robot");
@@ -19,11 +21,11 @@ const emotionButtons = document.querySelectorAll(".btn-emotion");
 function connectWS() {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const wsUrl = `${protocol}//${window.location.host}/ws/remote`;
-  
+
   ws = new WebSocket(wsUrl);
 
   ws.onopen = () => {
-    console.log("Conectado al Gateway agento-control-remote");
+    console.log("Connected to agento-control-remote gateway");
   };
 
   ws.onmessage = (event) => {
@@ -31,19 +33,18 @@ function connectWS() {
       const msg = JSON.parse(event.data);
       handleServerMessage(msg);
     } catch (err) {
-      console.warn("Mensaje no-JSON recibido:", event.data);
+      console.warn("Non-JSON message received:", event.data);
     }
   };
 
   ws.onclose = () => {
-    console.log("Desconectado del Gateway. Reintentando en 2s...");
     badgeRobot.className = "badge off";
     badgeCloud.className = "badge off";
     setTimeout(connectWS, 2000);
   };
 
   ws.onerror = (err) => {
-    console.error("Error en WebSocket:", err);
+    console.error("WebSocket error:", err);
   };
 }
 
@@ -62,7 +63,6 @@ function handleServerMessage(msg) {
 function updateUIStatus(status) {
   if (!status) return;
 
-  // Update robot badge
   if (status.robot_connected) {
     badgeRobot.className = "badge on";
     badgeRobot.textContent = "Robot OK";
@@ -71,7 +71,6 @@ function updateUIStatus(status) {
     badgeRobot.textContent = "Robot OFF";
   }
 
-  // Update cloud badge
   if (status.upstream_connected) {
     badgeCloud.className = "badge on";
     badgeCloud.textContent = "xiaozhi.me OK";
@@ -80,7 +79,6 @@ function updateUIStatus(status) {
     badgeCloud.textContent = "xiaozhi.me ESPERA";
   }
 
-  // Update mic mute toggle
   if (status.robot_mic_muted !== undefined) {
     muteToggle.checked = status.robot_mic_muted;
     if (status.robot_mic_muted) {
@@ -92,7 +90,6 @@ function updateUIStatus(status) {
     }
   }
 
-  // Update active emotion button
   if (status.current_emotion) {
     emotionButtons.forEach((btn) => {
       if (btn.dataset.emotion === status.current_emotion) {
@@ -107,12 +104,29 @@ function updateUIStatus(status) {
 function handleCloudEvent(payload) {
   if (!payload) return;
 
-  if (payload.type === "tts" && payload.state === "start") {
-    transcriptFeed.innerHTML = `<span class="text-speaking">🗣️ El robot está respondiendo por su altavoz...</span>`;
+  if (payload.type === "stt" && payload.text) {
+    lastAssistantText = "";
+    transcriptFeed.innerHTML = `<span class="text-speaking">🎙️ Escuchado: "${payload.text}"</span>`;
+  } else if (payload.type === "tts" && payload.state === "start") {
+    lastAssistantText = "";
+    transcriptFeed.innerHTML = `<span class="text-speaking">🗣️ El robot está respondiendo...</span>`;
+  } else if (payload.type === "tts" && payload.state === "sentence_start" && payload.text) {
+    lastAssistantText = (lastAssistantText ? lastAssistantText + " " : "") + payload.text;
+    transcriptFeed.innerHTML = `<span class="text-speaking">🤖 ${lastAssistantText}</span>`;
   } else if (payload.type === "tts" && payload.state === "stop") {
-    transcriptFeed.innerHTML = `<span class="placeholder">Listo para la siguiente frase. Mantén presionado para hablar.</span>`;
-  } else if (payload.type === "llm" && payload.text) {
-    transcriptFeed.innerHTML = `<span class="text-speaking">${payload.text}</span>`;
+    if (lastAssistantText) {
+      transcriptFeed.innerHTML = `<span class="text-speaking">🤖 ${lastAssistantText}</span>`;
+    } else {
+      transcriptFeed.innerHTML = `<span class="placeholder">Listo para la siguiente frase. Mantén presionado para hablar.</span>`;
+    }
+  } else if (payload.type === "llm" && payload.emotion) {
+    emotionButtons.forEach((btn) => {
+      if (btn.dataset.emotion === payload.emotion) {
+        btn.classList.add("active");
+      } else {
+        btn.classList.remove("active");
+      }
+    });
   }
 }
 
@@ -149,11 +163,27 @@ muteToggle.addEventListener("change", () => {
   }
 });
 
+function downsampleTo16k(float32Input, inputSampleRate) {
+  if (inputSampleRate === 16000) {
+    return float32Input;
+  }
+  const ratio = inputSampleRate / 16000;
+  const newLength = Math.round(float32Input.length / ratio);
+  const result = new Float32Array(newLength);
+  for (let i = 0; i < newLength; i++) {
+    const idx = Math.min(float32Input.length - 1, Math.floor(i * ratio));
+    result[i] = float32Input[idx];
+  }
+  return result;
+}
+
 // Push-To-Talk (Walkie-Talkie) Handlers using Web Audio API PCM
 async function startRecording() {
   if (isRecording) return;
+  wantRecording = true;
 
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    wantRecording = false;
     transcriptFeed.innerHTML = `<span style="color: #ff1744; font-weight: bold; font-size: 0.8rem;">⚠️ El navegador requiere HTTPS para el micrófono.<br>Ingresá por: <u>https://${window.location.hostname}:8443/</u></span>`;
     return;
   }
@@ -169,16 +199,32 @@ async function startRecording() {
       }
     });
 
+    if (!wantRecording) {
+      mediaStream.getTracks().forEach((track) => track.stop());
+      mediaStream = null;
+      return;
+    }
+
     audioCtx = new (window.AudioContext || window.webkitAudioContext)({
       sampleRate: 16000
     });
+    const actualSampleRate = audioCtx.sampleRate || 16000;
     const source = audioCtx.createMediaStreamSource(mediaStream);
 
-    // Buffer size 2048 samples
+    isRecording = true;
+    btnPtt.classList.add("recording");
+    pttText.textContent = "HABLANDO...";
+    transcriptFeed.innerHTML = `<span class="text-speaking">🎙️ Transmitiendo voz limpia al robot...</span>`;
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "ptt_start" }));
+    }
+
     scriptNode = audioCtx.createScriptProcessor(2048, 1, 1);
     scriptNode.onaudioprocess = (e) => {
       if (!isRecording) return;
-      const input = e.inputBuffer.getChannelData(0);
+      const rawInput = e.inputBuffer.getChannelData(0);
+      const input = downsampleTo16k(rawInput, actualSampleRate);
       const pcm16 = new Int16Array(input.length);
       for (let i = 0; i < input.length; i++) {
         const s = Math.max(-1, Math.min(1, input[i]));
@@ -191,28 +237,20 @@ async function startRecording() {
 
     source.connect(scriptNode);
     scriptNode.connect(audioCtx.destination);
-
-    isRecording = true;
-    btnPtt.classList.add("recording");
-    pttText.textContent = "HABLANDO...";
-    transcriptFeed.innerHTML = `<span class="text-speaking">🎙️ Transmitiendo voz limpia al robot...</span>`;
-
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "ptt_start" }));
-    }
   } catch (err) {
-    console.error("Error al acceder al micrófono:", err);
+    console.error("Microphone error:", err);
     transcriptFeed.innerHTML = `<span style="color: #ff1744;">Error de micrófono: ${err.message}</span>`;
     stopRecording();
   }
 }
 
 function stopRecording() {
+  wantRecording = false;
   if (!isRecording) return;
   isRecording = false;
   btnPtt.classList.remove("recording");
   pttText.textContent = "MANTENER PARA HABLAR";
-  transcriptFeed.innerHTML = `<span class="placeholder">Voz enviada a xiaozhi.me. El robot responderá por su altavoz...</span>`;
+  transcriptFeed.innerHTML = `<span class="placeholder">Procesando voz en xiaozhi.me...</span>`;
 
   if (scriptNode) {
     scriptNode.disconnect();
@@ -238,17 +276,16 @@ btnPtt.addEventListener("pointerdown", (e) => {
   startRecording();
 });
 
-window.addEventListener("pointerup", (e) => {
-  if (isRecording) {
+window.addEventListener("pointerup", () => {
+  if (wantRecording || isRecording) {
     stopRecording();
   }
 });
 
-btnPtt.addEventListener("pointercancel", (e) => {
-  if (isRecording) {
+btnPtt.addEventListener("pointercancel", () => {
+  if (wantRecording || isRecording) {
     stopRecording();
   }
 });
 
-// Start WebSocket connection on load
 connectWS();
