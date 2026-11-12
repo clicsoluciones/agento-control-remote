@@ -74,6 +74,11 @@ async def set_mic(req: MicRequest):
     return {"status": "ok", "robot_mic_muted": muted}
 
 
+@app.post("/api/robot/stop")
+async def stop_robot_speech():
+    return await gateway.stop_speaking()
+
+
 @app.post("/xiaozhi/ota/")
 @app.post("/ota/")
 async def ota_endpoint(request: Request):
@@ -133,6 +138,8 @@ async def remote_websocket_endpoint(websocket: WebSocket):
                     await gateway.send_phone_audio_start()
                 elif msg_type == "ptt_stop":
                     await gateway.send_phone_audio_stop()
+                elif msg_type == "stop_speech" or msg_type == "abort":
+                    await gateway.stop_speaking()
                 elif msg_type == "get_status":
                     await websocket.send_text(json.dumps({
                         "type": "status",

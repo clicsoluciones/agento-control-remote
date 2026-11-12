@@ -13,6 +13,7 @@ const badgeCloud = document.getElementById("badge-cloud");
 const muteToggle = document.getElementById("mute-toggle");
 const muteLabel = document.getElementById("mute-label");
 const btnPtt = document.getElementById("btn-ptt");
+const btnStop = document.getElementById("btn-stop");
 const pttText = document.getElementById("ptt-text");
 const transcriptFeed = document.getElementById("transcript-feed");
 const emotionButtons = document.querySelectorAll(".btn-emotion");
@@ -55,6 +56,9 @@ function handleServerMessage(msg) {
     if (msg.status) {
       updateUIStatus(msg.status);
     }
+  } else if (msg.type === "speech_stopped") {
+    lastAssistantText = "";
+    transcriptFeed.innerHTML = `<span class="placeholder">⏹️ ${msg.message || "Respuesta detenida por el operador"}. Listo para hablar.</span>`;
   } else if (msg.type === "cloud_event") {
     handleCloudEvent(msg.payload);
   }
@@ -288,4 +292,27 @@ btnPtt.addEventListener("pointercancel", () => {
   }
 });
 
+// Stop / Interruption Handler
+function triggerStopSpeech() {
+  lastAssistantText = "";
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "stop_speech" }));
+  } else {
+    fetch("/api/robot/stop", { method: "POST" }).catch(() => {});
+  }
+  if (btnStop) {
+    btnStop.classList.add("active-stop");
+    setTimeout(() => btnStop.classList.remove("active-stop"), 350);
+  }
+  transcriptFeed.innerHTML = `<span class="placeholder">⏹️ Respuesta detenida. Listo para hablar.</span>`;
+}
+
+if (btnStop) {
+  btnStop.addEventListener("click", (e) => {
+    e.preventDefault();
+    triggerStopSpeech();
+  });
+}
+
+// Start WebSocket connection on load
 connectWS();

@@ -1,1 +1,448 @@
-/home/yaqui/App-dev/agents/agento-manager/robot-cli
+#!/usr/bin/env python3
+"""
+Robot CLI - Standalone Device & Firmware Manager for agento-control-remote
+Manages ESP32 robot NVS routing, flashing, backups, and live serial logs.
+"""
+
+import sys
+import os
+import time
+import subprocess
+import zlib
+import struct
+import math
+import argparse
+import shutil
+
+# Resolve self directories dynamically
+WORKSPACE = os.path.dirname(os.path.abspath(__file__))
+LOCAL_VENV_PY = os.path.join(WORKSPACE, ".venv", "bin", "python3")
+FALLBACK_VENV_PY = "/home/yaqui/App-dev/agents/agent1/venv/bin/python3"
+
+# Re-exec into local or fallback venv if required modules are missing
+if not getattr(sys, "_reexec_done", False):
+    try:
+        import serial
+        import esptool
+    except ImportError:
+        sys._reexec_done = True
+        if os.path.exists(LOCAL_VENV_PY):
+            os.execv(LOCAL_VENV_PY, [LOCAL_VENV_PY] + sys.argv)
+        elif os.path.exists(FALLBACK_VENV_PY):
+            os.execv(FALLBACK_VENV_PY, [FALLBACK_VENV_PY] + sys.argv)
+
+
+def resolve_esptool() -> list:
+    """Find the best esptool executable or module call."""
+    local_esptool = os.path.join(WORKSPACE, ".venv", "bin", "esptool")
+    if os.path.exists(local_esptool):
+        return [local_esptool]
+    fallback_esptool = "/home/yaqui/App-dev/agents/agent1/venv/bin/esptool.py"
+    if os.path.exists(fallback_esptool):
+        return [fallback_esptool]
+    which_esptool = shutil.which("esptool") or shutil.which("esptool.py")
+    if which_esptool:
+        return [which_esptool]
+    return [sys.executable, "-m", "esptool"]
+
+
+ESPTOOL_CMD = resolve_esptool()
+PORT = os.getenv("ROBOT_PORT", "/dev/ttyACM0")
+BAUD = 460800
+SERIAL_BAUD = 115200
+NVS_OFFSET = "0x9000"
+NVS_SIZE = "0x4000"
+
+FIRMWARE_DIR = os.path.join(WORKSPACE, "firmware")
+BACKUP_FACTORY = os.path.join(FIRMWARE_DIR, "backup_factory_16MB.bin")
+MERGED_BINARY = os.path.join(FIRMWARE_DIR, "merged-binary.bin")
+NVS_BACKUPS_DIR = os.path.join(WORKSPACE, "nvs_backups")
+os.makedirs(NVS_BACKUPS_DIR, exist_ok=True)
+
+# ANSI colors
+CYAN = "\033[96m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+RESET = "\033[0m"
+BOLD = "\033[1m"
+
+
+def get_local_lan_ip():
+    try:
+        out = subprocess.check_output(["ip", "-4", "addr", "show"], text=True)
+        import re
+        ips = re.findall(r"inet (192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+)", out)
+        if ips:
+            return ips[0]
+    except Exception:
+        pass
+    return "192.168.101.11"
+
+
+def read_device_nvs():
+    tmp_nvs = os.path.join(NVS_BACKUPS_DIR, "tmp_nvs.bin")
+    cmd = ESPTOOL_CMD + [
+        "-p", PORT, "-b", str(BAUD),
+        "read_flash", NVS_OFFSET, NVS_SIZE, tmp_nvs
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        print(f"{RED}[ERROR] Failed to read NVS from {PORT}:{RESET}\n{res.stderr}")
+        return None
+    with open(tmp_nvs, "rb") as f:
+        data = f.read()
+    try:
+        os.remove(tmp_nvs)
+    except Exception:
+        pass
+    return data
+
+
+def write_device_nvs(nvs_bytes):
+    tmp_nvs = os.path.join(NVS_BACKUPS_DIR, "tmp_nvs_patch.bin")
+    with open(tmp_nvs, "wb") as f:
+        f.write(nvs_bytes)
+    cmd = ESPTOOL_CMD + [
+        "-p", PORT, "-b", str(BAUD),
+        "write_flash", NVS_OFFSET, tmp_nvs
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        print(f"{RED}[ERROR] Failed to flash NVS:{RESET}\n{res.stderr}")
+        return False
+    # Reset chip
+    subprocess.run(ESPTOOL_CMD + ["-p", PORT, "run"], capture_output=True)
+    try:
+        os.remove(tmp_nvs)
+    except Exception:
+        pass
+    return True
+
+
+def patch_or_add_nvs_string(buf, ns_id, key_name, new_val):
+    data = bytearray(buf)
+    found = False
+    for p in range(4):
+        page = data[p*4096:(p+1)*4096]
+        entry_table = page[32:64]
+        for i in range(126):
+            byte_idx = (i * 2) // 8
+            bit_offset = (i * 2) % 8
+            state = (entry_table[byte_idx] >> bit_offset) & 3
+            if state == 2:  # written
+                offset = p*4096 + 64 + i * 32
+                entry = data[offset:offset+32]
+                ens, etype, espan, echunk = struct.unpack('<BBBB', entry[0:4])
+                ekey = entry[8:24].rstrip(b'\x00').decode('latin1', errors='ignore')
+                if ens == ns_id and ekey == key_name and etype == 0x21:
+                    max_len = (espan - 1) * 32
+                    val_bytes = new_val.encode('utf-8') + b'\x00'
+                    if len(val_bytes) <= max_len:
+                        payload_offset = offset + 32
+                        data[payload_offset:payload_offset+max_len] = b'\xff' * max_len
+                        data[payload_offset:payload_offset+len(val_bytes)] = val_bytes
+                        new_d_crc = zlib.crc32(val_bytes, 0xFFFFFFFF) & 0xFFFFFFFF
+                        struct.pack_into('<HHI', data, offset+24, len(val_bytes), 0xFFFF, new_d_crc)
+                        crc_data = bytearray(28)
+                        crc_data[0:4] = data[offset:offset+4]
+                        crc_data[4:28] = data[offset+8:offset+32]
+                        new_h_crc = zlib.crc32(bytes(crc_data), 0xFFFFFFFF) & 0xFFFFFFFF
+                        struct.pack_into('<I', data, offset+4, new_h_crc)
+                        found = True
+                        break
+        if found:
+            break
+
+    if found:
+        return bytes(data)
+
+    active_page_idx = -1
+    for p in range(4):
+        state = struct.unpack('<I', data[p*4096:p*4096+4])[0]
+        if state == 0xFFFFFFFE:
+            active_page_idx = p
+            break
+    if active_page_idx == -1:
+        active_page_idx = 1
+
+    val_bytes = new_val.encode('utf-8') + b'\x00'
+    data_entry_count = math.ceil(len(val_bytes) / 32)
+    span = 1 + data_entry_count
+
+    page_offset = active_page_idx * 4096
+    table = data[page_offset+32 : page_offset+64]
+
+    start_slot = -1
+    for i in range(126 - span + 1):
+        ok = True
+        for s in range(span):
+            idx = i + s
+            byte_idx = (idx * 2) // 8
+            bit_offset = (idx * 2) % 8
+            if ((table[byte_idx] >> bit_offset) & 3) != 3:
+                ok = False
+                break
+        if ok:
+            start_slot = i
+            break
+
+    if start_slot == -1:
+        raise RuntimeError("No free slots found in NVS active page")
+
+    payload_buf = bytearray(val_bytes)
+    padding = (data_entry_count * 32) - len(val_bytes)
+    payload_buf.extend(b'\xff' * padding)
+
+    data_offset = page_offset + 64 + (start_slot + 1) * 32
+    data[data_offset : data_offset + len(payload_buf)] = payload_buf
+
+    d_crc = zlib.crc32(val_bytes, 0xFFFFFFFF) & 0xFFFFFFFF
+    header = bytearray(32)
+    key_bytes = key_name.encode('utf-8')[:15]
+    key_padded = key_bytes.ljust(16, b'\x00')
+
+    header[0] = ns_id
+    header[1] = 0x21  # string
+    header[2] = span
+    header[3] = 0xFF
+    header[8:24] = key_padded
+    struct.pack_into('<HHI', header, 24, len(val_bytes), 0xFFFF, d_crc)
+
+    crc_data = bytearray(28)
+    crc_data[0:4] = header[0:4]
+    crc_data[4:28] = header[8:32]
+    h_crc = zlib.crc32(bytes(crc_data), 0xFFFFFFFF) & 0xFFFFFFFF
+    struct.pack_into('<I', header, 4, h_crc)
+
+    header_offset = page_offset + 64 + start_slot * 32
+    data[header_offset : header_offset + 32] = header
+
+    table_ba = bytearray(data[page_offset+32 : page_offset+64])
+    for s in range(span):
+        idx = start_slot + s
+        byte_idx = (idx * 2) // 8
+        bit_offset = (idx * 2) % 8
+        table_ba[byte_idx] &= ~(3 << bit_offset)
+        table_ba[byte_idx] |= (2 << bit_offset)
+    data[page_offset+32 : page_offset+64] = table_ba
+
+    return bytes(data)
+
+
+def parse_nvs_summary(buf):
+    import re
+    strings = re.findall(rb'[\x20-\x7e]{4,}', buf)
+    str_list = [s.decode('latin1', errors='ignore') for s in strings]
+
+    info = {
+        "wifi_ssid": "Unknown",
+        "websocket_url": "Default / Not Set",
+        "ota_url": "Default (https://api.tenclass.net/xiaozhi/ota/)",
+        "mqtt_endpoint": "Default (api.tenclass.net)"
+    }
+
+    for i, s in enumerate(str_list):
+        if s == "ssid" and i+1 < len(str_list):
+            info["wifi_ssid"] = str_list[i+1]
+        elif s == "endpoint" and i+1 < len(str_list):
+            info["mqtt_endpoint"] = str_list[i+1].lstrip("B")
+        elif s == "ota_url" and i+1 < len(str_list):
+            info["ota_url"] = str_list[i+1]
+        elif "ws://" in s or "wss://" in s:
+            m = re.search(r'(wss?://[^\s\x00]+)', s)
+            if m:
+                info["websocket_url"] = m.group(1)
+
+    return info
+
+
+def cmd_status(args):
+    print(f"\n{BOLD}{CYAN}=== ESP32 S3 ROBOT STATUS (agento-control-remote) ==={RESET}\n")
+    if os.path.exists(PORT):
+        print(f"  {GREEN}●{RESET} USB Port:       {BOLD}{PORT}{RESET} (Connected)")
+    else:
+        print(f"  {RED}●{RESET} USB Port:       {BOLD}{PORT}{RESET} (Disconnected)")
+        return
+
+    lan_ip = get_local_lan_ip()
+    print(f"  {CYAN}●{RESET} Host LAN IP:    {BOLD}{lan_ip}{RESET}")
+
+    try:
+        d_out = subprocess.check_output(
+            ["docker", "ps", "--filter", "name=agento-control-remote", "--format", "{{.Status}}"],
+            text=True
+        ).strip()
+        if d_out:
+            print(f"  {GREEN}●{RESET} Gateway Docker: {BOLD}Running{RESET} ({d_out})")
+            print(f"      Robot WS:    ws://{lan_ip}:8080/xiaozhi/v1/")
+            print(f"      Robot OTA:   http://{lan_ip}:8080/xiaozhi/ota/")
+            print(f"      Web PWA UI:  https://{lan_ip}:8443/")
+        else:
+            print(f"  {YELLOW}●{RESET} Gateway Docker: {YELLOW}Stopped{RESET}")
+    except Exception:
+        print(f"  {RED}●{RESET} Docker: Not accessible")
+
+    print(f"\n{CYAN}Reading current NVS partition from device...{RESET}")
+    nvs_buf = read_device_nvs()
+    if nvs_buf:
+        summary = parse_nvs_summary(nvs_buf)
+        print(f"  {GREEN}●{RESET} Wi-Fi SSID:     {BOLD}{summary['wifi_ssid']}{RESET}")
+        print(f"  {GREEN}●{RESET} OTA Endpoint:   {BOLD}{summary['ota_url']}{RESET}")
+        print(f"  {GREEN}●{RESET} WebSocket URL:  {BOLD}{summary['websocket_url']}{RESET}")
+        print(f"  {GREEN}●{RESET} MQTT Cloud:     {BOLD}{summary['mqtt_endpoint']}{RESET}")
+    print()
+
+
+def cmd_route(args):
+    target = args.target.lower()
+    lan_ip = get_local_lan_ip()
+
+    if target == "custom":
+        url = args.custom_url or f"http://{lan_ip}:8080"
+        ota_target = url.rstrip("/") + "/xiaozhi/ota/"
+        ws_target = url.replace("http://", "ws://").replace("https://", "wss://").rstrip("/") + "/xiaozhi/v1/"
+        desc = f"Custom Gateway ({url})"
+    elif target == "native":
+        ota_target = "https://api.tenclass.net/xiaozhi/ota/"
+        ws_target = "wss://api.tenclass.net/xiaozhi/v1/"
+        desc = "Native Factory Cloud (Bitsy / TenClass)"
+    elif target == "local":
+        ota_target = f"http://{lan_ip}:8003/xiaozhi/ota/"
+        ws_target = f"ws://{lan_ip}:8000/xiaozhi/v1/"
+        desc = f"Local Backend ({lan_ip})"
+    else:
+        print(f"{RED}[ERROR] Unknown target: {target}{RESET}")
+        return
+
+    print(f"\n{BOLD}{CYAN}=== SWITCHING ROBOT ROUTE TO: {desc} ==={RESET}\n")
+    print(f"  Target OTA: {BOLD}{ota_target}{RESET}")
+    print(f"  Target WS:  {BOLD}{ws_target}{RESET}")
+
+    print(f"\n1. Reading current NVS from device...")
+    nvs_buf = read_device_nvs()
+    if not nvs_buf:
+        return
+
+    ts = int(time.time())
+    backup_path = os.path.join(NVS_BACKUPS_DIR, f"nvs_backup_before_route_{ts}.bin")
+    with open(backup_path, "wb") as f:
+        f.write(nvs_buf)
+    print(f"2. Current NVS backed up to: {backup_path}")
+
+    print("3. Patching NVS parameters...")
+    patched = patch_or_add_nvs_string(nvs_buf, 3, "ota_url", ota_target)
+    patched = patch_or_add_nvs_string(patched, 7, "url", ws_target)
+
+    print("4. Writing patched NVS to 0x9000 (16KB) & resetting robot...")
+    if write_device_nvs(patched):
+        print(f"\n{GREEN}{BOLD}✔ SUCCESS! Robot routed to {desc} and restarted!{RESET}\n")
+    else:
+        print(f"\n{RED}{BOLD}✖ FAILED to flash NVS.{RESET}\n")
+
+
+def cmd_monitor(args):
+    import serial
+    print(f"\n{BOLD}{CYAN}=== ESP32 SERIAL MONITOR ({PORT} @ {SERIAL_BAUD}) ==={RESET}")
+    print(f"{YELLOW}Press Ctrl+C to exit monitor.{RESET}\n")
+    try:
+        ser = serial.Serial(PORT, SERIAL_BAUD, timeout=0.1)
+    except Exception as e:
+        print(f"{RED}[ERROR] Could not open {PORT}: {e}{RESET}")
+        return
+
+    try:
+        while True:
+            line = ser.readline()
+            if line:
+                decoded = line.decode('utf-8', errors='replace').rstrip()
+                if "E (" in decoded:
+                    print(f"{RED}{decoded}{RESET}")
+                elif "W (" in decoded:
+                    print(f"{YELLOW}{decoded}{RESET}")
+                elif "I (" in decoded:
+                    print(f"{CYAN}{decoded}{RESET}")
+                else:
+                    print(decoded)
+    except KeyboardInterrupt:
+        print(f"\n{GREEN}Monitor stopped.{RESET}")
+    finally:
+        ser.close()
+
+
+def cmd_backup(args):
+    import hashlib
+    ts = int(time.time())
+    if args.type == "nvs":
+        out_file = os.path.join(NVS_BACKUPS_DIR, f"nvs_backup_{ts}.bin")
+        cmd = ESPTOOL_CMD + ["-p", PORT, "-b", str(BAUD), "read_flash", NVS_OFFSET, NVS_SIZE, out_file]
+    else:
+        out_file = os.path.join(NVS_BACKUPS_DIR, f"flash_full_16MB_{ts}.bin")
+        cmd = ESPTOOL_CMD + ["-p", PORT, "-b", str(BAUD), "read_flash", "0", "0x1000000", out_file]
+
+    print(f"{CYAN}Starting {args.type.upper()} backup...{RESET}")
+    res = subprocess.run(cmd)
+    if res.returncode == 0 and os.path.exists(out_file):
+        sha = hashlib.sha256(open(out_file, "rb").read()).hexdigest()
+        print(f"\n{GREEN}✔ Backup saved:{RESET} {out_file}")
+        print(f"  SHA-256: {sha}\n")
+    else:
+        print(f"{RED}✖ Backup failed.{RESET}")
+
+
+def cmd_restore(args):
+    target = BACKUP_FACTORY
+    if args.file:
+        target = args.file
+
+    if not os.path.exists(target):
+        print(f"{RED}[ERROR] Backup file not found: {target}{RESET}")
+        return
+
+    print(f"\n{RED}{BOLD}⚠ CAUTION: FLASHING FIRMWARE TO DEVICE ⚠{RESET}")
+    print(f"Target file: {target} ({os.path.getsize(target)} bytes)")
+    confirm = input("Are you sure you want to write to flash 0x0? (yes/no): ")
+    if confirm.lower() != "yes":
+        print("Restoration aborted.")
+        return
+
+    cmd = ESPTOOL_CMD + ["-p", PORT, "-b", str(BAUD), "write_flash", "0", target]
+    subprocess.run(cmd)
+    subprocess.run(ESPTOOL_CMD + ["-p", PORT, "run"])
+    print(f"\n{GREEN}✔ Firmware restored and chip restarted!{RESET}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Robot CLI - Standalone Controller for agento-control-remote")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    subparsers.add_parser("status", help="Show hardware, NVS endpoints, and gateway Docker status")
+
+    p_route = subparsers.add_parser("route", help="Switch robot endpoint (custom | native | local)")
+    p_route.add_argument("target", choices=["custom", "native", "local"], help="Target destination")
+    p_route.add_argument("--url", dest="custom_url", help="Custom server URL (defaults to http://<lan_ip>:8080)")
+
+    subparsers.add_parser("monitor", help="Open real-time serial monitor of the robot")
+
+    p_backup = subparsers.add_parser("backup", help="Create binary backup of flash or NVS")
+    p_backup.add_argument("--type", choices=["nvs", "full"], default="nvs", help="Backup type (default: nvs)")
+
+    p_restore = subparsers.add_parser("restore", help="Restore factory or custom firmware")
+    p_restore.add_argument("--file", help="Custom firmware .bin file to restore (defaults to factory)")
+
+    args = parser.parse_args()
+
+    if args.command == "status":
+        cmd_status(args)
+    elif args.command == "route":
+        cmd_route(args)
+    elif args.command == "monitor":
+        cmd_monitor(args)
+    elif args.command == "backup":
+        cmd_backup(args)
+    elif args.command == "restore":
+        cmd_restore(args)
+
+
+if __name__ == "__main__":
+    main()

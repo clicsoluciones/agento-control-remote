@@ -50,11 +50,11 @@ async def test_api_status_endpoint():
 async def test_api_emotion_endpoint():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        response = await ac.post("/api/robot/emotion", json={"emotion": "wink"})
+        response = await ac.post("/api/robot/emotion", json={"emotion": "thinking"})
         assert response.status_code == 200
         data = response.json()
-        assert data["emotion"] == "winking"
-        assert data["emoji"] == "😉"
+        assert data["emotion"] == "thinking"
+        assert data["emoji"] == "🤔"
 
 
 @pytest.mark.asyncio
@@ -65,6 +65,22 @@ async def test_api_mic_endpoint():
         assert response.status_code == 200
         data = response.json()
         assert data["robot_mic_muted"] is True
+
+
+@pytest.mark.asyncio
+async def test_api_stop_endpoint():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        response = await ac.post("/api/robot/stop")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_gateway_stop_speaking():
+    res = await gateway.stop_speaking()
+    assert res["status"] == "ok"
 
 
 @pytest.mark.asyncio

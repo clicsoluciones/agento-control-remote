@@ -15,8 +15,6 @@ EMOTION_MAP: Dict[str, tuple[str, str]] = {
     "happy": ("😊", "happy"),
     "thinking": ("🤔", "thinking"),
     "surprised": ("😲", "surprised"),
-    "wink": ("😉", "winking"),
-    "sleepy": ("😴", "sleepy"),
     "neutral": ("😐", "neutral"),
     "sad": ("😢", "sad"),
     "angry": ("😠", "angry"),
@@ -158,6 +156,43 @@ class XiaozhiGateway:
             "status": self.get_status()
         })
         return {"status": "ok", "emotion": emotion_code, "emoji": emoji}
+
+    async def stop_speaking(self) -> Dict[str, Any]:
+        """Abort/interrupt current agent speech turn on upstream cloud and robot speaker."""
+        logger.info(f"Stopping/aborting agent speech (session: {self.session_id})")
+        self.upstream_listening_state = None
+
+        # 1. Instruct upstream cloud to cancel active generation
+        if self.upstream_ws is not None and not self.upstream_ws.closed:
+            try:
+                await self.upstream_ws.send_str(json.dumps({
+                    "session_id": self.session_id,
+                    "type": "abort"
+                }))
+            except Exception as e:
+                logger.warning(f"Error sending abort to upstream: {e}")
+
+        # 2. Instruct physical robot to stop speaking immediately and reset audio decoder
+        if self.robot_ws is not None:
+            try:
+                await self.robot_ws.send_text(json.dumps({
+                    "session_id": self.session_id,
+                    "type": "abort"
+                }))
+                await self.robot_ws.send_text(json.dumps({
+                    "session_id": self.session_id,
+                    "type": "tts",
+                    "state": "stop"
+                }))
+            except Exception as e:
+                logger.warning(f"Error sending stop to robot: {e}")
+
+        # 3. Notify remotes
+        await self.broadcast_to_remotes({
+            "type": "speech_stopped",
+            "message": "Respuesta detenida por el operador"
+        })
+        return {"status": "ok", "message": "Speech stopped"}
 
     async def connect_upstream(self):
         await self.ensure_upstream_ready()

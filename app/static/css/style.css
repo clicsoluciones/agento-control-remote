@@ -187,7 +187,7 @@ input:checked + .slider:before {
 /* Emotion grid */
 .emotion-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(78px, 1fr));
   gap: 8px;
 }
 
@@ -308,6 +308,53 @@ input:checked + .slider:before {
     transform: scale(1.4);
     opacity: 0;
   }
+}
+
+/* Stop / Interrupt button */
+.stop-action-zone {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 100%;
+  padding-bottom: 8px;
+}
+
+.btn-stop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(239, 68, 68, 0.12);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  padding: 10px 22px;
+  border-radius: 9999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  outline: none;
+  touch-action: manipulation;
+}
+
+.btn-stop .stop-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.btn-stop:hover {
+  background: rgba(239, 68, 68, 0.22);
+  border-color: rgba(239, 68, 68, 0.6);
+  color: #ffffff;
+}
+
+.btn-stop:active, .btn-stop.active-stop {
+  background: #dc2626;
+  border-color: #ef4444;
+  color: #ffffff;
+  transform: scale(0.96);
+  box-shadow: 0 0 16px rgba(220, 38, 38, 0.5);
 }
 
 .transcript-feed {
