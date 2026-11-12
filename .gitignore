@@ -17,4 +17,6 @@ data/*.sqlite*
 .env
 .env.*
 !.env.example
+credentials/
+*credentials*.txt
 note

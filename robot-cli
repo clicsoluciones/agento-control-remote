@@ -46,8 +46,49 @@ def resolve_esptool() -> list:
     return [sys.executable, "-m", "esptool"]
 
 
+def detect_serial_port() -> str:
+    """Detect available serial port across Windows, macOS, and Linux."""
+    if os.getenv("ROBOT_PORT"):
+        return os.getenv("ROBOT_PORT")
+
+    # Try pyserial list_ports
+    try:
+        import serial.tools.list_ports
+        ports = list(serial.tools.list_ports.comports())
+        if ports:
+            for p in ports:
+                desc = f"{p.description or ''} {p.manufacturer or ''}".lower()
+                if any(k in desc for k in ["esp32", "ch340", "cp210", "usb", "acm", "uart", "serial"]):
+                    return p.device
+            return ports[0].device
+    except Exception:
+        pass
+
+    if sys.platform.startswith("win"):
+        return "COM3"
+    elif sys.platform.startswith("darwin"):
+        import glob
+        matches = glob.glob("/dev/cu.usbmodem*") + glob.glob("/dev/cu.usbserial*")
+        return matches[0] if matches else "/dev/cu.usbmodem01"
+    else:
+        import glob
+        matches = glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*")
+        return matches[0] if matches else "/dev/ttyACM0"
+
+
+def check_port_exists(port_name: str) -> bool:
+    """Check if the given serial port exists or is connected."""
+    if sys.platform.startswith("win"):
+        try:
+            import serial.tools.list_ports
+            return any(p.device.upper() == port_name.upper() for p in serial.tools.list_ports.comports())
+        except Exception:
+            return True
+    return os.path.exists(port_name)
+
+
 ESPTOOL_CMD = resolve_esptool()
-PORT = os.getenv("ROBOT_PORT", "/dev/ttyACM0")
+PORT = detect_serial_port()
 BAUD = 460800
 SERIAL_BAUD = 115200
 NVS_OFFSET = "0x9000"
@@ -259,7 +300,7 @@ def parse_nvs_summary(buf):
 
 def cmd_status(args):
     print(f"\n{BOLD}{CYAN}=== ESP32 S3 ROBOT STATUS (agento-control-remote) ==={RESET}\n")
-    if os.path.exists(PORT):
+    if check_port_exists(PORT):
         print(f"  {GREEN}●{RESET} USB Port:       {BOLD}{PORT}{RESET} (Connected)")
     else:
         print(f"  {RED}●{RESET} USB Port:       {BOLD}{PORT}{RESET} (Disconnected)")
@@ -501,17 +542,19 @@ def api_request(url: str, method: str = "GET", payload: dict = None):
 def cmd_account_create(args):
     import secrets
     import uuid
+    import time
+    import re
     if WORKSPACE not in sys.path:
         sys.path.insert(0, WORKSPACE)
     from app.db import create_or_update_device
 
     print(f"\n{BOLD}{CYAN}=== REGISTRO DE CUENTA DE DISPOSITIVO (agento-control-remote) ==={RESET}\n")
 
-    # 1. Ask only for device name if not passed
-    name = args.name
+    # 1. Ask for device name
+    name = getattr(args, "name", None)
     if not name:
         try:
-            name = input(f"{BOLD}Nombre del dispositivo (ej: robot-1): {RESET}").strip()
+            name = input(f"{BOLD}¿Cómo querés llamar a tu robot? (ej: mi-robot-1): {RESET}").strip()
         except (KeyboardInterrupt, EOFError):
             print("\nOperación cancelada.")
             return
@@ -519,6 +562,8 @@ def cmd_account_create(args):
     if not name:
         print(f"{RED}[ERROR] El nombre del dispositivo es obligatorio.{RESET}")
         return
+
+    clean_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', name)
 
     # 2. Compute device_id (MAC) from hardware
     print(f"{CYAN}1. Detectando dirección MAC desde {PORT}...{RESET}")
@@ -538,47 +583,36 @@ def cmd_account_create(args):
     else:
         print(f"   {GREEN}✔ UUID detectado:{RESET} {client_uuid}")
 
-    # 4. Generate password securely (or prompt without echo)
-    # Never accept password via CLI flags to avoid leaking into bash history and process table
-    import getpass
-    password = ""
-    if sys.stdin.isatty():
-        try:
-            custom_pw = getpass.getpass(f"{BOLD}Contraseña personalizada (Enter para generar aleatoria segura): {RESET}").strip()
-            if custom_pw:
-                password = custom_pw
-        except (KeyboardInterrupt, EOFError):
-            print("\nOperación cancelada.")
-            return
-
-    if not password:
-        password = secrets.token_urlsafe(12)
+    # 4. Generate random password
+    print(f"{CYAN}3. Generando contraseña segura aleatoria...{RESET}")
+    password = secrets.token_urlsafe(16)
 
     # 5. Save to local SQLite database
-    print(f"{CYAN}3. Guardando credenciales en base de datos SQLite local (data/devices.db)...{RESET}")
+    print(f"{CYAN}4. Guardando credenciales en base de datos local (data/devices.db)...{RESET}")
     create_or_update_device(name=name, device_id=mac, client_id=client_uuid, password=password)
 
-    # 6. If target is production, register directly via Server REST API (no SSH / back access required!)
+    # 6. If target is production, register directly via Server REST API (no SSH / backend access required!)
     is_prod = getattr(args, "prod", False) or bool(getattr(args, "url", None))
     prod_url = getattr(args, "url", None) or get_env_var("ROBOT_PROD_URL")
 
     if is_prod and not prod_url:
+        default_prod = "https://agento.yaquimartinez.com"
         try:
-            prod_url = input(f"{BOLD}URL del servidor de Producción (ej: http://MI-VPS:8088): {RESET}").strip()
-            if prod_url:
-                env_file = os.path.join(WORKSPACE, ".env")
-                try:
-                    with open(env_file, "a") as f:
-                        f.write(f"\nROBOT_PROD_URL={prod_url}\n")
-                    print(f"{GREEN}✔ Guardado en .env local (ROBOT_PROD_URL){RESET}")
-                except Exception:
-                    pass
+            inp = input(f"{BOLD}URL del servidor de Producción [{default_prod}]: {RESET}").strip()
+            prod_url = inp if inp else default_prod
+            env_file = os.path.join(WORKSPACE, ".env")
+            try:
+                with open(env_file, "a") as f:
+                    f.write(f"\nROBOT_PROD_URL={prod_url}\n")
+                print(f"{GREEN}✔ Guardado en .env local (ROBOT_PROD_URL){RESET}")
+            except Exception:
+                pass
         except (KeyboardInterrupt, EOFError):
             print("\nOperación cancelada.")
             return
 
     if is_prod and prod_url:
-        print(f"{CYAN}4. Registrando en API de Producción ({prod_url})...{RESET}")
+        print(f"{CYAN}5. Registrando en API de Producción ({prod_url})...{RESET}")
         try:
             reg_endpoint = prod_url.rstrip("/") + "/api/devices/register"
             res = api_request(reg_endpoint, method="POST", payload={
@@ -599,12 +633,46 @@ def cmd_account_create(args):
     if is_prod and prod_url:
         import urllib.parse
         parsed = urllib.parse.urlparse(prod_url)
-        access_url = f"https://{parsed.hostname}:8443/"
+        if parsed.scheme == "https" and not parsed.port:
+            access_url = f"https://{parsed.hostname}/"
+        elif parsed.port:
+            access_url = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}/"
+        else:
+            access_url = f"{parsed.scheme}://{parsed.hostname}/"
     elif is_prod:
-        access_url = "https://<TU_IP_O_DOMINIO_VPS>:8443/"
+        access_url = "https://agento.yaquimartinez.com/"
 
-    # 7. Print clean formatted credential card to terminal
+    # 7. Save credentials to a persistent text file
+    creds_dir = os.path.join(WORKSPACE, "credentials")
+    os.makedirs(creds_dir, exist_ok=True)
+    creds_file = os.path.join(creds_dir, f"credentials_{clean_name}.txt")
+
     env_title = "PRODUCCIÓN (API Remota)" if is_prod else "LOCAL"
+    file_content = f"""=================================================================
+AGENTO CONTROL REMOTE - CREDENCIALES DEL DISPOSITIVO
+=================================================================
+Fecha de Registro:       {time.strftime('%Y-%m-%d %H:%M:%S')}
+Entorno:                 {env_title}
+URL de Acceso Web (PWA): {access_url}
+
+Nombre del Dispositivo:  {name}
+Contraseña de Acceso:    {password}
+
+Device-Id (MAC):         {mac}
+Client-Id (UUID):        {client_uuid}
+=================================================================
+INSTRUCCIONES DE ACCESO:
+1. Abrí en tu celular o navegador web:
+   {access_url}
+2. Iniciá sesión con:
+   • Dispositivo: {name}
+   • Contraseña:  {password}
+=================================================================
+"""
+    with open(creds_file, "w", encoding="utf-8") as f:
+        f.write(file_content)
+
+    # 8. Print clean formatted credential card to terminal
     print(f"\n{BOLD}{GREEN}================================================================={RESET}")
     print(f"{BOLD}{GREEN}  ✔ CUENTA DE DISPOSITIVO REGISTRADA CON ÉXITO [{env_title}]{RESET}")
     print(f"{BOLD}{GREEN}================================================================={RESET}")
@@ -613,10 +681,15 @@ def cmd_account_create(args):
     print(f"  {BOLD}Client-Id (UUID):{RESET}        {client_uuid}")
     print(f"  {BOLD}Contraseña de Acceso:{RESET}    {YELLOW}{password}{RESET}")
     print(f"-----------------------------------------------------------------")
+    print(f"  {BOLD}📁 Archivo de Credenciales:{RESET}")
+    print(f"     {GREEN}{creds_file}{RESET}")
+    print(f"     {YELLOW}(Tus credenciales y contraseña se guardaron en este archivo){RESET}")
+    print(f"-----------------------------------------------------------------")
     print(f"  {BOLD}URL de Acceso Web (PWA):{RESET} {access_url}")
     print(f"  {BOLD}Credenciales para Login:{RESET}")
     print(f"    • Dispositivo: {CYAN}{name}{RESET}")
     print(f"    • Contraseña:  {YELLOW}{password}{RESET}")
+    print(f"{BOLD}{GREEN}================================================================={RESET}\n")
     print(f"{BOLD}{GREEN}================================================================={RESET}\n")
 
 
@@ -663,35 +736,45 @@ def cmd_account_list(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Robot CLI - Standalone Controller for agento-control-remote")
+    parser.add_argument("-p", "--port", dest="global_port", help="Serial port of robot (e.g. COM3, /dev/ttyACM0, /dev/cu.usbmodem*)")
+
+    port_parser = argparse.ArgumentParser(add_help=False)
+    port_parser.add_argument("-p", "--port", help="Serial port of robot (e.g. COM3 on Windows, /dev/ttyACM0 on Linux, /dev/cu.usbmodem* on macOS)")
+
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("status", help="Show hardware, NVS endpoints, and gateway Docker status")
+    subparsers.add_parser("status", parents=[port_parser], help="Show hardware, NVS endpoints, and gateway Docker status")
 
-    p_route = subparsers.add_parser("route", help="Switch robot endpoint (local | prod | native | custom)")
+    p_route = subparsers.add_parser("route", parents=[port_parser], help="Switch robot endpoint (local | prod | native | custom)")
     p_route.add_argument("target", choices=["local", "prod", "production", "native", "custom"], help="Target destination")
     p_route.add_argument("--url", dest="custom_url", help="Custom server URL (defaults to http://<lan_ip>:8080)")
 
-    subparsers.add_parser("monitor", help="Open real-time serial monitor of the robot")
+    subparsers.add_parser("monitor", parents=[port_parser], help="Open real-time serial monitor of the robot")
 
-    p_backup = subparsers.add_parser("backup", help="Create binary backup of flash or NVS")
+    p_backup = subparsers.add_parser("backup", parents=[port_parser], help="Create binary backup of flash or NVS")
     p_backup.add_argument("--type", choices=["nvs", "full"], default="nvs", help="Backup type (default: nvs)")
 
-    p_restore = subparsers.add_parser("restore", help="Restore factory or custom firmware")
+    p_restore = subparsers.add_parser("restore", parents=[port_parser], help="Restore factory or custom firmware")
     p_restore.add_argument("--file", help="Custom firmware .bin file to restore (defaults to factory)")
 
     p_account = subparsers.add_parser("account", help="Manage multi-device robot accounts in SQLite")
     acc_sub = p_account.add_subparsers(dest="account_cmd", required=True)
 
-    p_acc_create = acc_sub.add_parser("create", help="Create a device account from connected hardware")
+    p_acc_create = acc_sub.add_parser("create", parents=[port_parser], help="Create a device account from connected hardware")
     p_acc_create.add_argument("--name", help="Device name (e.g. robot-1)")
     p_acc_create.add_argument("--prod", action="store_true", help="Register directly to production server via REST API")
-    p_acc_create.add_argument("--url", help="Custom production server URL (e.g. http://<VPS_IP>:8088)")
+    p_acc_create.add_argument("--url", help="Custom production server URL (e.g. https://agento.yaquimartinez.com)")
 
     p_acc_list = acc_sub.add_parser("list", help="List registered device accounts")
     p_acc_list.add_argument("--prod", action="store_true", help="List devices registered on production server via REST API")
-    p_acc_list.add_argument("--url", help="Custom production server URL (e.g. http://<VPS_IP>:8088)")
+    p_acc_list.add_argument("--url", help="Custom production server URL (e.g. https://agento.yaquimartinez.com)")
 
     args = parser.parse_args()
+
+    global PORT
+    selected_port = getattr(args, "port", None) or getattr(args, "global_port", None)
+    if selected_port:
+        PORT = selected_port
 
     if args.command == "status":
         cmd_status(args)
