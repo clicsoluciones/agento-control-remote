@@ -9,9 +9,9 @@ Gateway & Remote Control for Xiaozhi ESP32 Robot integrating with official xiaoz
 - S5: Standalone container Dockerfile & docker-compose configuration for easy deployment and event execution.
 
 ## Tasks
-- T1 (S1, S2, S3): Core async gateway server with Xiaozhi protocol bridge, emotion injector, mic mute gate, and phone audio forwarder.
-- T2 (S4): Mobile-first Web UI / PWA with Push-To-Talk, emotion selector, and status dashboard.
-- T3 (S5): Container image build (Dockerfile, docker-compose.yml), automated test suite, and run documentation.
+- [x] T1 (S1, S2, S3): Core async gateway server with Xiaozhi protocol bridge, emotion injector, mic mute gate, and phone audio forwarder. (commit a3cbc18)
+- [x] T2 (S4): Mobile-first Web UI / PWA with Push-To-Talk, emotion selector, and status dashboard. (commit a3cbc18)
+- [x] T3 (S5): Container image build (Dockerfile, docker-compose.yml), automated test suite, and run documentation. (commit a3cbc18)
 
 ## Log
 - L1: User requested a dedicated project named `agento-control-remote` connecting to `https://xiaozhi.me/` to control faces, mute the robot mic, and use a phone mic for noisy venue interaction.
