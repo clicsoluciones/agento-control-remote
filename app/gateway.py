@@ -6,6 +6,7 @@ from typing import Dict, Any, Optional, Set
 import aiohttp
 from fastapi import WebSocket, WebSocketDisconnect
 from app.config import settings
+from app.audio_codec import OpusEncoder
 
 logger = logging.getLogger("agento-control-remote")
 logger.setLevel(logging.INFO)
@@ -37,6 +38,11 @@ class XiaozhiGateway:
         
         self._upstream_reader_task: Optional[asyncio.Task] = None
         self.device_headers: Dict[str, str] = {}
+        try:
+            self.opus_encoder = OpusEncoder(sample_rate=16000, channels=1, frame_duration_ms=60)
+        except Exception as e:
+            logger.warning(f"Failed to initialize OpusEncoder: {e}")
+            self.opus_encoder = None
 
     def get_status(self) -> Dict[str, Any]:
         upstream_connected = (
@@ -165,7 +171,7 @@ class XiaozhiGateway:
 
             async for msg in self.upstream_ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
-                    # JSON control / TTS status frame from cloud
+                    logger.info(f"Upstream text: {msg.data[:120]}")
                     try:
                         data = json.loads(msg.data)
                         if "session_id" in data:
@@ -188,6 +194,7 @@ class XiaozhiGateway:
 
                 elif msg.type == aiohttp.WSMsgType.BINARY:
                     # Binary TTS Opus audio frames from cloud -> forward to robot speaker!
+                    logger.info(f"Upstream audio: {len(msg.data)} bytes -> Robot speaker")
                     if self.robot_ws is not None:
                         try:
                             await self.robot_ws.send_bytes(msg.data)
@@ -195,6 +202,8 @@ class XiaozhiGateway:
                             logger.error(f"Error forwarding downstream audio to robot: {e}")
 
                 elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                    close_code = getattr(self.upstream_ws, "close_code", "unknown")
+                    logger.warning(f"Upstream WebSocket disconnected, code: {close_code}")
                     break
         except asyncio.CancelledError:
             pass
@@ -228,6 +237,13 @@ class XiaozhiGateway:
                 message = await ws.receive()
                 if "text" in message and message["text"] is not None:
                     text_data = message["text"]
+                    logger.info(f"Robot text: {text_data[:120]}")
+                    try:
+                        d = json.loads(text_data)
+                        if "session_id" in d:
+                            self.session_id = d["session_id"]
+                    except Exception:
+                        pass
                     # Forward robot text frames (hello, ping, etc.) upstream
                     if self.upstream_ws is not None and not self.upstream_ws.closed:
                         await self.upstream_ws.send_str(text_data)
@@ -257,30 +273,48 @@ class XiaozhiGateway:
 
     async def send_phone_audio_start(self):
         """Instruct cloud upstream that a speech turn begins from remote microphone."""
+        if self.opus_encoder:
+            self.opus_encoder.reset()
         await self.connect_upstream()
         if self.upstream_ws is not None and not self.upstream_ws.closed:
             start_payload = {
+                "session_id": self.session_id,
                 "type": "listen",
                 "state": "start",
                 "mode": "manual"
             }
             await self.upstream_ws.send_str(json.dumps(start_payload))
-            logger.info("Sent speech start to upstream from remote phone.")
+            logger.info(f"Sent speech start to upstream (session: {self.session_id})")
 
     async def send_phone_audio_chunk(self, chunk: bytes):
-        """Forward binary Opus audio chunk from phone to cloud upstream."""
-        if self.upstream_ws is not None and not self.upstream_ws.closed:
+        """Process binary audio chunk from phone, encode to Opus, forward to upstream."""
+        if not self.upstream_ws or self.upstream_ws.closed:
+            return
+
+        if self.opus_encoder:
+            # chunk is raw 16kHz PCM from browser
+            try:
+                packets = self.opus_encoder.encode_pcm(chunk)
+                for pkt in packets:
+                    await self.upstream_ws.send_bytes(pkt)
+                if packets:
+                    logger.debug(f"Streamed {len(packets)} Opus packets to upstream.")
+            except Exception as e:
+                logger.error(f"Error encoding PCM chunk: {e}")
+        else:
+            # Forward raw chunk directly if encoder unavailable
             await self.upstream_ws.send_bytes(chunk)
 
     async def send_phone_audio_stop(self):
         """Instruct cloud upstream that speech turn ended; trigger LLM/TTS generation."""
         if self.upstream_ws is not None and not self.upstream_ws.closed:
             stop_payload = {
+                "session_id": self.session_id,
                 "type": "listen",
                 "state": "stop"
             }
             await self.upstream_ws.send_str(json.dumps(stop_payload))
-            logger.info("Sent speech stop to upstream from remote phone. Cloud processing initiated.")
+            logger.info(f"Sent speech stop to upstream (session: {self.session_id})")
 
     async def shutdown(self):
         if self._upstream_reader_task:

@@ -1,8 +1,9 @@
 // agento-control-remote PWA controller
 let ws = null;
-let mediaRecorder = null;
-let audioStream = null;
 let isRecording = false;
+let audioCtx = null;
+let scriptNode = null;
+let mediaStream = null;
 
 // DOM Elements
 const badgeRobot = document.getElementById("badge-robot");
@@ -148,56 +149,60 @@ muteToggle.addEventListener("change", () => {
   }
 });
 
-// Push-To-Talk (Walkie-Talkie) Handlers
+// Push-To-Talk (Walkie-Talkie) Handlers using Web Audio API PCM
 async function startRecording() {
   if (isRecording) return;
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    transcriptFeed.innerHTML = `<span style="color: #ff1744; font-weight: bold; font-size: 0.8rem;">⚠️ El navegador requiere HTTPS para el micrófono.<br>Ingresá por: <u>https://${window.location.hostname}:8443/</u></span>`;
+    return;
+  }
+
   try {
-    if (!audioStream) {
-      audioStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          sampleRate: 16000,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
-      });
-    }
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        sampleRate: 16000,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    });
+
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+      sampleRate: 16000
+    });
+    const source = audioCtx.createMediaStreamSource(mediaStream);
+
+    // Buffer size 2048 samples
+    scriptNode = audioCtx.createScriptProcessor(2048, 1, 1);
+    scriptNode.onaudioprocess = (e) => {
+      if (!isRecording) return;
+      const input = e.inputBuffer.getChannelData(0);
+      const pcm16 = new Int16Array(input.length);
+      for (let i = 0; i < input.length; i++) {
+        const s = Math.max(-1, Math.min(1, input[i]));
+        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(pcm16.buffer);
+      }
+    };
+
+    source.connect(scriptNode);
+    scriptNode.connect(audioCtx.destination);
 
     isRecording = true;
     btnPtt.classList.add("recording");
     pttText.textContent = "HABLANDO...";
-    transcriptFeed.innerHTML = `<span class="text-speaking">🎙️ Grabando voz limpia del teléfono...</span>`;
+    transcriptFeed.innerHTML = `<span class="text-speaking">🎙️ Transmitiendo voz limpia al robot...</span>`;
 
-    // Notify Gateway that PTT started
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "ptt_start" }));
     }
-
-    // Use MediaRecorder to stream opus chunks
-    let mimeType = "audio/webm;codecs=opus";
-    if (!MediaRecorder.isTypeSupported(mimeType)) {
-      mimeType = "audio/ogg;codecs=opus";
-      if (!MediaRecorder.isTypeSupported(mimeType)) {
-        mimeType = "";
-      }
-    }
-
-    const options = mimeType ? { mimeType } : {};
-    mediaRecorder = new MediaRecorder(audioStream, options);
-
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0 && ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(e.data);
-      }
-    };
-
-    // Request chunks every 60ms for low-latency streaming
-    mediaRecorder.start(60);
-
   } catch (err) {
     console.error("Error al acceder al micrófono:", err);
-    transcriptFeed.innerHTML = `<span style="color: #ff1744;">Error al activar micrófono: ${err.message}</span>`;
+    transcriptFeed.innerHTML = `<span style="color: #ff1744;">Error de micrófono: ${err.message}</span>`;
     stopRecording();
   }
 }
@@ -207,13 +212,21 @@ function stopRecording() {
   isRecording = false;
   btnPtt.classList.remove("recording");
   pttText.textContent = "MANTENER PARA HABLAR";
-  transcriptFeed.innerHTML = `<span class="placeholder">Enviando a xiaozhi.me... Generando respuesta...</span>`;
+  transcriptFeed.innerHTML = `<span class="placeholder">Voz enviada a xiaozhi.me. El robot responderá por su altavoz...</span>`;
 
-  if (mediaRecorder && mediaRecorder.state !== "inactive") {
-    mediaRecorder.stop();
+  if (scriptNode) {
+    scriptNode.disconnect();
+    scriptNode = null;
+  }
+  if (audioCtx && audioCtx.state !== "closed") {
+    audioCtx.close();
+    audioCtx = null;
+  }
+  if (mediaStream) {
+    mediaStream.getTracks().forEach((track) => track.stop());
+    mediaStream = null;
   }
 
-  // Notify Gateway that PTT stopped
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "ptt_stop" }));
   }
