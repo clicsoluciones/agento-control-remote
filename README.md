@@ -82,16 +82,22 @@ The repository includes `./robot-cli`, an all-in-one controller with an isolated
 
 Create a secure account for your robot without leaking passwords in bash history:
 ```bash
+# Local registration (writes directly to local SQLite database)
 ./robot-cli account create --name robot-1
+
+# Remote / Production registration (via public REST API, no SSH required)
+./robot-cli account create --name robot-1 --prod
 ```
 - Automatically reads the hardware MAC (`Device-Id`) from `/dev/ttyACM0`.
 - Extracts or generates the `Client-Id` (UUID) from chip NVS.
 - Prompts for a password (hidden without echo) or auto-generates a secure 16-character token on Enter.
-- Saves to `data/devices.db` and displays credentials on stdout.
+- Saves credentials securely (hashed with PBKDF2-SHA256) and displays login information on stdout.
 
 To list registered devices:
 ```bash
 ./robot-cli account list
+# or remotely in production:
+./robot-cli account list --prod
 ```
 
 ### Switching Robot Routes (Local vs Production)
