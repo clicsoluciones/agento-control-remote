@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Agento Control Remote</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="manifest" href="/static/manifest.json">
+  <meta name="theme-color" content="#0d1117">
+</head>
+<body>
+  <div class="app-container">
+    <header class="top-bar">
+      <div class="brand">
+        <span class="icon">🤖</span>
+        <h1>agento-remote</h1>
+      </div>
+      <div class="connection-badges">
+        <span id="badge-robot" class="badge off">Robot</span>
+        <span id="badge-cloud" class="badge off">xiaozhi.me</span>
+      </div>
+    </header>
+
+    <main class="content">
+      <!-- Robot Mic Control Card -->
+      <section class="card mic-control-card">
+        <div class="card-header">
+          <h2>Modo Evento Ruidoso</h2>
+          <span class="subtext">Silenciar micrófono del robot para evitar eco y acople</span>
+        </div>
+        <div class="toggle-container">
+          <label class="switch">
+            <input type="checkbox" id="mute-toggle" checked>
+            <span class="slider round"></span>
+          </label>
+          <span id="mute-label" class="toggle-status active">Mic Robot: SILENCIADO</span>
+        </div>
+      </section>
+
+      <!-- Emotion Remote Control Card -->
+      <section class="card emotions-card">
+        <div class="card-header">
+          <h2>Expresiones del Rostro</h2>
+          <span class="subtext">Cambia la cara del robot en pantalla ST7789</span>
+        </div>
+        <div class="emotion-grid">
+          <button class="btn-emotion active" data-emotion="happy">
+            <span class="emoji">😊</span>
+            <span class="name">Feliz</span>
+          </button>
+          <button class="btn-emotion" data-emotion="thinking">
+            <span class="emoji">🤔</span>
+            <span class="name">Pensando</span>
+          </button>
+          <button class="btn-emotion" data-emotion="surprised">
+            <span class="emoji">😲</span>
+            <span class="name">Sorpresa</span>
+          </button>
+          <button class="btn-emotion" data-emotion="wink">
+            <span class="emoji">😉</span>
+            <span class="name">Guiño</span>
+          </button>
+          <button class="btn-emotion" data-emotion="sleepy">
+            <span class="emoji">😴</span>
+            <span class="name">Sueño</span>
+          </button>
+          <button class="btn-emotion" data-emotion="neutral">
+            <span class="emoji">😐</span>
+            <span class="name">Neutro</span>
+          </button>
+          <button class="btn-emotion" data-emotion="sad">
+            <span class="emoji">😢</span>
+            <span class="name">Triste</span>
+          </button>
+          <button class="btn-emotion" data-emotion="angry">
+            <span class="emoji">😠</span>
+            <span class="name">Molesto</span>
+          </button>
+          <button class="btn-emotion" data-emotion="shocked">
+            <span class="emoji">😱</span>
+            <span class="name">Shock</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- Push To Talk Section -->
+      <section class="card ptt-card">
+        <div class="card-header">
+          <h2>Micrófono Remoto (PTT)</h2>
+          <span class="subtext">Habla desde tu celular; el audio sale por el parlante del robot</span>
+        </div>
+
+        <div class="ptt-action-zone">
+          <button id="btn-ptt" class="ptt-button" aria-label="Mantener presionado para hablar">
+            <div class="ptt-inner">
+              <svg class="mic-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                <line x1="12" y1="19" x2="12" y2="23"/>
+                <line x1="8" y1="23" x2="16" y2="23"/>
+              </svg>
+              <span id="ptt-text">MANTENER PARA HABLAR</span>
+            </div>
+            <div class="pulse-ring"></div>
+          </button>
+        </div>
+
+        <div id="transcript-feed" class="transcript-feed">
+          <span class="placeholder">El robot hablará por su altavoz con la respuesta de xiaozhi.me</span>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>agento-control-remote • Conectado a xiaozhi.me</span>
+    </footer>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

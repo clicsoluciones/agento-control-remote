@@ -1,0 +1,129 @@
+import os
+import json
+import logging
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from typing import Optional
+
+from app.gateway import gateway, EMOTION_MAP
+from app.config import settings
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("main")
+
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Starting agento-control-remote Gateway...")
+    yield
+    logger.info("Shutting down agento-control-remote Gateway...")
+    await gateway.shutdown()
+
+
+app = FastAPI(
+    title="agento-control-remote",
+    description="Remote Control & Gateway for Xiaozhi ESP32 Robot integrating with xiaozhi.me",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+
+# Serve static files if directory exists
+if os.path.exists(STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.get("/", response_class=HTMLResponse)
+async def get_index():
+    index_file = os.path.join(STATIC_DIR, "index.html")
+    if os.path.exists(index_file):
+        return FileResponse(index_file)
+    return HTMLResponse("<h1>agento-control-remote Gateway Active</h1>")
+
+
+@app.get("/api/status")
+async def get_status():
+    return gateway.get_status()
+
+
+class EmotionRequest(BaseModel):
+    emotion: str
+
+
+@app.post("/api/robot/emotion")
+async def set_emotion(req: EmotionRequest):
+    return await gateway.set_emotion(req.emotion)
+
+
+class MicRequest(BaseModel):
+    muted: bool
+
+
+@app.post("/api/robot/mic")
+async def set_mic(req: MicRequest):
+    muted = await gateway.set_mic_muted(req.muted)
+    return {"status": "ok", "robot_mic_muted": muted}
+
+
+# Robot WebSocket Endpoints (support standard endpoints used by Xiaozhi firmwares)
+@app.websocket("/xiaozhi/v1/")
+@app.websocket("/ws/robot")
+@app.websocket("/ws")
+async def robot_websocket_endpoint(websocket: WebSocket):
+    headers = dict(websocket.headers)
+    extracted_headers = {}
+    for h in ("device-id", "authorization", "protocol-version", "client-id"):
+        for k, v in headers.items():
+            if k.lower() == h:
+                # Normalize key names for upstream
+                norm_key = "-".join([part.capitalize() for part in h.split("-")])
+                extracted_headers[norm_key] = v
+
+    await gateway.handle_robot_connection(websocket, extracted_headers)
+
+
+# Mobile / Remote Control WebSocket Endpoint
+@app.websocket("/ws/remote")
+async def remote_websocket_endpoint(websocket: WebSocket):
+    await gateway.register_remote(websocket)
+    try:
+        while True:
+            data = await websocket.receive()
+            if "text" in data and data["text"]:
+                msg = json.loads(data["text"])
+                msg_type = msg.get("type")
+
+                if msg_type == "set_emotion":
+                    await gateway.set_emotion(msg.get("emotion", "happy"))
+                elif msg_type == "set_mic_muted":
+                    await gateway.set_mic_muted(bool(msg.get("muted", True)))
+                elif msg_type == "ptt_start":
+                    await gateway.send_phone_audio_start()
+                elif msg_type == "ptt_stop":
+                    await gateway.send_phone_audio_stop()
+                elif msg_type == "get_status":
+                    await websocket.send_text(json.dumps({
+                        "type": "status",
+                        "data": gateway.get_status()
+                    }))
+
+            elif "bytes" in data and data["bytes"]:
+                # Binary audio frame arriving from phone mic
+                await gateway.send_phone_audio_chunk(data["bytes"])
+
+            elif data.get("type") == "websocket.disconnect":
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning(f"Remote WS disconnected with: {e}")
+    finally:
+        gateway.unregister_remote(websocket)
