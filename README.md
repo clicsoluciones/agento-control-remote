@@ -46,9 +46,52 @@ Gateway, Firmware Manager & PWA Remote Control for the **Xiaozhi ESP32-S3 Voice 
 
 ---
 
-## 🛠️ Quickstart
+## 📱 Quickstart: Robot Onboarding Guide (For Clients / Operators)
 
-### 1. Environment Setup
+> **No server setup required!** If your server is already deployed (e.g. `https://agento.yaquimartinez.com`), follow these steps on your computer with your robot connected via USB.
+
+### Step 1: Connect your Robot
+Plug your Xiaozhi ESP32-S3 Spotpear robot into your computer using a USB-C data cable (detected at `/dev/ttyACM0`).
+
+### Step 2: Route Robot to Production
+Configure the robot's firmware and Wi-Fi to communicate with the production server over secure WebSockets (WSS):
+```bash
+./robot-cli route prod --url https://agento.yaquimartinez.com
+```
+*This command automatically updates the robot's NVS partition with the production OTA and WebSocket endpoints.*
+
+### Step 3: Register Device Account in Production
+Create your device account in production directly from the CLI without needing SSH or server credentials:
+```bash
+./robot-cli account create --name mi-robot-1 --prod
+```
+1. Reads hardware MAC (`Device-Id`) and UUID (`Client-Id`) directly from the connected chip.
+2. Prompts you for a password (hidden, without echo) or press Enter to auto-generate a secure password.
+3. Automatically registers the robot in the cloud database via public REST API.
+4. Prints your login credentials to the terminal.
+
+### Step 4: Open the Web PWA & Control
+Open the web app in your smartphone or desktop browser:
+👉 **[https://agento.yaquimartinez.com/](https://agento.yaquimartinez.com/)**
+
+1. Log in with your **Device Name** (`mi-robot-1`) and **Password**.
+2. Start controlling your robot:
+   - **Facial Expressions**: Change real-time emotions on the ST7789 display.
+   - **Walkie-Talkie (Push-To-Talk)**: Speak into your smartphone microphone with clean 16kHz Opus streaming directly to the robot's speaker.
+   - **Mute Mic**: Silence the robot's physical microphone to prevent noise interference.
+   - **STOP Button**: Instantly interrupt the robot while it is speaking.
+
+### Step 5: (Optional) Verify Serial Logs
+Check live serial output from the robot to confirm upstream connection:
+```bash
+./robot-cli monitor
+```
+
+---
+
+## 🖥️ Server Deployment Guide (For Admins / Self-Hosting)
+
+If you are setting up your own gateway server or self-hosting:
 
 Copy `.env.example` to `.env`:
 ```bash
