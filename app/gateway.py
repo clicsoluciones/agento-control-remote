@@ -443,7 +443,16 @@ class XiaozhiGateway:
 
                         if msg_type == "listen":
                             if self.robot_mic_muted:
-                                logger.info(f"Muted robot listen ignored: state={d.get('state')}")
+                                logger.info(f"Muted robot listen intercepted & aborted: state={d.get('state')}")
+                                if d.get("state") == "start":
+                                    try:
+                                        await ws.send_text(json.dumps({
+                                            "type": "listen",
+                                            "state": "stop",
+                                            "session_id": self.session_id
+                                        }))
+                                    except Exception as e:
+                                        logger.warning(f"Failed to send immediate listen stop to muted robot: {e}")
                                 continue
 
                             await self.ensure_upstream_ready()
