@@ -2,6 +2,8 @@
 
 Gateway, Firmware Manager & PWA Remote Control for the **Xiaozhi ESP32-S3 Voice Robot** (Spotpear ST7789). It proxies sessions to the official **[xiaozhi.me](https://xiaozhi.me/)** cloud (`api.tenclass.net`) while providing complete real-time remote orchestration from a mobile smartphone or desktop browser.
 
+> 💡 **Looking to connect a robot device?** Read the standalone [Agent Setup Guide (AGENT_SETUP.md)](AGENT_SETUP.md) for quick step-by-step instructions (no server setup needed).
+
 ---
 
 ## 🚀 Key Capabilities
